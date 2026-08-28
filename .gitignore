@@ -1,0 +1,27 @@
+# Secrets et configuration locale
+/config/config.php
+/cnx/config.php
+.env
+.env.*
+
+# Dépendances PHP
+/vendor/
+
+# Fichiers uploadés (données utilisateurs)
+/uploads/*
+!/uploads/.gitkeep
+
+# Dumps base de données (ne pas publier)
+/crict_ent*.sql
+*.dump.sql
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
+
+# Cursor / assets locaux
+.cursor/
