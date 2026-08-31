@@ -43,6 +43,7 @@ function auto_anaq_assurer_schema(): void {
             id smallint UNSIGNED NOT NULL AUTO_INCREMENT, reference_id smallint UNSIGNED NOT NULL,
             champ_id tinyint UNSIGNED NOT NULL, code varchar(15) NOT NULL,
             ligne_directrice text NOT NULL, question text NOT NULL, elements_preuves text,
+            type_saisie enum('SCORE','NOMBRE') NOT NULL DEFAULT 'SCORE',
             ordre smallint UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (id), UNIQUE KEY uq_auto_crit_code (code),
             KEY fk_auto_crit_ref (reference_id), KEY fk_auto_crit_champ (champ_id)
@@ -86,6 +87,9 @@ function auto_anaq_assurer_schema(): void {
     try {
         $db->exec("ALTER TABLE identite_auto_criteres DROP INDEX uq_auto_crit_code");
         $db->exec("ALTER TABLE identite_auto_criteres ADD UNIQUE KEY uq_auto_crit_ref_code (reference_id, code)");
+    } catch (Throwable $e) {}
+    try {
+        $db->exec("ALTER TABLE identite_auto_criteres ADD COLUMN type_saisie ENUM('SCORE','NOMBRE') NOT NULL DEFAULT 'SCORE' AFTER elements_preuves");
     } catch (Throwable $e) {}
 }
 
@@ -470,21 +474,42 @@ function auto_anaq_critere_voisins(int $critere_id): array {
     return ['prev' => $prev->fetch() ?: null, 'next' => $next->fetch() ?: null];
 }
 
+/** Type NOMBRE : pas de niveau 0–5 (même logique que DGRS). */
+function auto_anaq_critere_type_nombre(array $c): bool {
+    return ($c['type_saisie'] ?? 'SCORE') === 'NOMBRE';
+}
+
+/** Complété = réponse remplie + (score renseigné si type SCORE). Identique à champ.php DGRS. */
+function auto_anaq_critere_est_complete(array $c): bool {
+    if (!identite_est_complete($c['reponse'] ?? '')) {
+        return false;
+    }
+    if (auto_anaq_critere_type_nombre($c)) {
+        return true;
+    }
+    return array_key_exists('score', $c) && $c['score'] !== null && $c['score'] !== '';
+}
+
+function auto_anaq_sql_critere_complet(): string {
+    $ph = str_replace("'", "''", IDENTITE_A_COMPLETER);
+    return "TRIM(COALESCE(ct.reponse, '')) <> ''
+            AND TRIM(COALESCE(ct.reponse, '')) <> '{$ph}'
+            AND (COALESCE(c.type_saisie, 'SCORE') = 'NOMBRE' OR ct.score IS NOT NULL)";
+}
+
 function auto_anaq_statut_critere(array $c): string {
-    $rep = trim((string)($c['reponse'] ?? ''));
-    if ($rep !== '') return 'renseigne';
-    if (!empty($c['score']) || trim((string)($c['commentaire'] ?? '')) !== '') return 'en_cours';
-    return 'a_completer';
+    return auto_anaq_critere_est_complete($c) ? 'complete' : 'a_completer';
 }
 
 function auto_anaq_completude_champ(int $champ_id): array {
-    $s = get_db()->prepare('
+    $cond = auto_anaq_sql_critere_complet();
+    $s = get_db()->prepare("
         SELECT COUNT(*) AS total,
-               SUM(CASE WHEN TRIM(COALESCE(ct.reponse,\'\')) <> \'\' THEN 1 ELSE 0 END) AS faits
+               SUM(CASE WHEN {$cond} THEN 1 ELSE 0 END) AS faits
         FROM identite_auto_criteres c
         LEFT JOIN identite_auto_contenu ct ON ct.critere_id = c.id
         WHERE c.champ_id = ?
-    ');
+    ");
     $s->execute([$champ_id]);
     $r = $s->fetch();
     $total = (int)($r['total'] ?? 0);
@@ -497,24 +522,25 @@ function auto_anaq_completude_globale(?int $canevas_id = null): array {
         $c = auto_anaq_canevas_courant();
         $canevas_id = $c ? (int)$c['id'] : 0;
     }
+    $cond = auto_anaq_sql_critere_complet();
     if ($canevas_id > 0) {
-        $s = get_db()->prepare('
+        $s = get_db()->prepare("
             SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN TRIM(COALESCE(ct.reponse,\'\')) <> \'\' THEN 1 ELSE 0 END) AS faits
+                   SUM(CASE WHEN {$cond} THEN 1 ELSE 0 END) AS faits
             FROM identite_auto_criteres c
             JOIN identite_auto_champs ch ON ch.id = c.champ_id
             LEFT JOIN identite_auto_contenu ct ON ct.critere_id = c.id
             WHERE ch.canevas_id = ?
-        ');
+        ");
         $s->execute([$canevas_id]);
         $r = $s->fetch();
     } else {
-        $s = get_db()->query('
+        $s = get_db()->query("
             SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN TRIM(COALESCE(ct.reponse,\'\')) <> \'\' THEN 1 ELSE 0 END) AS faits
+                   SUM(CASE WHEN {$cond} THEN 1 ELSE 0 END) AS faits
             FROM identite_auto_criteres c
             LEFT JOIN identite_auto_contenu ct ON ct.critere_id = c.id
-        ');
+        ");
         $r = $s->fetch();
     }
     $total = (int)($r['total'] ?? 0);
@@ -522,7 +548,7 @@ function auto_anaq_completude_globale(?int $canevas_id = null): array {
     return ['total' => $total, 'faits' => $faits, 'pct' => $total > 0 ? round(100 * $faits / $total) : 0];
 }
 
-function auto_anaq_contenu_sauver(int $critere_id, string $reponse, string $preuves, ?int $score, string $commentaire): bool {
+function auto_anaq_contenu_sauver(int $critere_id, string $reponse, string $preuves, ?int $score, string $commentaire, bool $log = true): bool {
     $db = get_db();
     $uid = user_id();
     if ($score !== null && ($score < 0 || $score > 5)) $score = null;
@@ -542,13 +568,90 @@ function auto_anaq_contenu_sauver(int $critere_id, string $reponse, string $preu
             $commentaire !== '' ? $commentaire : null,
             $uid ?: null,
         ]);
-        $crit = auto_anaq_critere_par_id($critere_id);
-        log_activite($uid, 'IDENTITE_CRICT', 'MODIFICATION',
-            'ANAQ critère ' . ($crit['code'] ?? $critere_id) . ' mis à jour');
+        if ($log) {
+            $crit = auto_anaq_critere_par_id($critere_id);
+            log_activite($uid, 'IDENTITE_CRICT', 'MODIFICATION',
+                'ANAQ critère ' . ($crit['code'] ?? $critere_id) . ' mis à jour');
+        }
         return true;
     } catch (Throwable $e) {
         return false;
     }
+}
+
+/** Score POST : conserve l'existant si le champ n'est pas envoyé (auto-save partiel). */
+function auto_anaq_point_score_from_post(?array $existant): ?int {
+    if (!array_key_exists('score', $_POST)) {
+        $s = $existant['score'] ?? null;
+        return ($s !== null && $s !== '') ? (int)$s : null;
+    }
+    $raw = $_POST['score'] ?? '';
+    if ($raw === '' || $raw === null) {
+        return null;
+    }
+    $score = (int)$raw;
+    return ($score >= 0 && $score <= 5) ? $score : null;
+}
+
+function auto_anaq_point_pieces_uploader(int $critere_id): array {
+    $erreurs = [];
+    if (empty($_FILES['pieces']['name'][0])) {
+        return $erreurs;
+    }
+    foreach ($_FILES['pieces']['name'] as $k => $nom) {
+        if (($_FILES['pieces']['error'][$k] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            continue;
+        }
+        $fk = [
+            'name'     => $nom,
+            'tmp_name' => $_FILES['pieces']['tmp_name'][$k],
+            'error'    => $_FILES['pieces']['error'][$k],
+            'size'     => $_FILES['pieces']['size'][$k],
+        ];
+        $r = auto_anaq_piece_ajouter($critere_id, $fk);
+        if (!$r['succes']) {
+            $erreurs[] = $nom . ' : ' . ($r['message'] ?? 'erreur');
+        }
+    }
+    return $erreurs;
+}
+
+function auto_anaq_point_sauver(int $critere_id, bool $with_uploads = false, bool $log = true): array {
+    if ($critere_id <= 0) {
+        return ['ok' => false, 'message' => 'Point invalide.'];
+    }
+    $existant = auto_anaq_critere_par_id($critere_id);
+    if (!$existant) {
+        return ['ok' => false, 'message' => 'Point introuvable.'];
+    }
+
+    $score = auto_anaq_critere_type_nombre($existant) ? null : auto_anaq_point_score_from_post($existant);
+
+    if (!auto_anaq_contenu_sauver(
+        $critere_id,
+        $_POST['reponse'] ?? '',
+        $_POST['preuves_disponibles'] ?? '',
+        $score,
+        $existant['commentaire'] ?? '',
+        $log
+    )) {
+        return ['ok' => false, 'message' => 'Erreur lors de l\'enregistrement.'];
+    }
+
+    $upload_errs = $with_uploads ? auto_anaq_point_pieces_uploader($critere_id) : [];
+
+    $crit = auto_anaq_critere_par_id($critere_id);
+    $st   = auto_anaq_statut_critere($crit ?: []);
+    $bd   = auto_anaq_badge_statut($st);
+
+    return [
+        'ok'           => true,
+        'message'      => 'Point enregistré.',
+        'upload_errs'  => $upload_errs,
+        'statut'       => $st,
+        'statut_label' => $bd[0],
+        'statut_class' => $bd[1],
+    ];
 }
 
 function auto_anaq_swot_lire(int $champ_id): array {
@@ -860,11 +963,11 @@ function auto_anaq_score_labels(): array {
     ];
 }
 
+/** Libellé + classe CSS id-status (aligné DGRS : Complété / À compléter). */
 function auto_anaq_badge_statut(string $statut): array {
     return match ($statut) {
-        'renseigne'   => ['Renseigné', '#dcfce7', '#166534'],
-        'en_cours'    => ['En cours', '#fef3c7', '#92400e'],
-        default       => ['À compléter', '#f1f5f9', '#64748b'],
+        'complete' => ['Complété', 'ok'],
+        default    => ['À compléter', 'todo'],
     };
 }
 

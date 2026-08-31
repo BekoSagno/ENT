@@ -26,6 +26,8 @@ $voisins       = auto_anaq_critere_voisins($critere_id);
 $pieces        = auto_anaq_pieces_lister($critere_id);
 $preuves_liste = auto_anaq_preuves_liste($critere['elements_preuves'] ?? '');
 $score_labels  = auto_anaq_score_labels();
+$is_nombre     = auto_anaq_critere_type_nombre($critere);
+$score         = $critere['score'] !== null && $critere['score'] !== '' ? (int)$critere['score'] : null;
 $st            = auto_anaq_statut_critere($critere);
 $bd            = auto_anaq_badge_statut($st);
 $edit_q        = auto_anaq_query_edit($mode_edit);
@@ -42,11 +44,11 @@ auto_anaq_ui_styles();
 ?>
 
 <div class="id-topbar">
-  <a href="auto_champ.php?id=<?= (int)$critere['champ_id'] ?><?= $edit_q ?>" class="btn btn-secondary btn-sm">
+  <a href="auto_champ.php?id=<?= (int)$critere['champ_id'] ?><?= $edit_q ?>" class="btn btn-secondary btn-sm<?= $mode_edit ? ' aa-nav-link' : '' ?>"<?= $mode_edit ? ' data-aa-nav="1"' : '' ?>>
     <i class="fa-solid fa-arrow-left"></i> Retour au thème
   </a>
   <div class="spacer"></div>
-  <span class="aa-badge" style="background:<?= $bd[1] ?>;color:<?= $bd[2] ?>;"><?= e($bd[0]) ?></span>
+  <span class="id-status <?= e($bd[1]) ?>" id="aa-statut-badge"><?= e($bd[0]) ?></span>
   <?php if ($peut_modifier && !$mode_edit): ?>
   <a href="?id=<?= $critere_id ?>&edit=1" class="btn btn-primary btn-sm"><i class="fa-solid fa-pen"></i> Modifier</a>
   <?php elseif ($mode_edit): ?>
@@ -91,7 +93,7 @@ auto_anaq_ui_styles();
 </div>
 
 <?php if ($mode_edit): ?>
-<form method="post" action="actions.php" enctype="multipart/form-data" class="aa-form">
+<form method="post" action="actions.php" enctype="multipart/form-data" class="aa-form" id="aa-form-point">
   <?= csrf_field() ?>
   <input type="hidden" name="action" value="sauver_auto_point">
   <input type="hidden" name="critere_id" value="<?= $critere_id ?>">
@@ -100,35 +102,12 @@ auto_anaq_ui_styles();
 
   <div class="aa-zone">
     <div class="aa-zone-lbl"><i class="fa-solid fa-pen"></i> Réponses</div>
-    <textarea name="reponse" class="form-control" rows="6" placeholder="Décrivez la situation du centre pour ce point…"><?= e($critere['reponse'] ?? '') ?></textarea>
+    <textarea name="reponse" class="form-control aa-autosave-field" rows="6" placeholder="Décrivez la situation du centre pour ce point…"><?= e($critere['reponse'] ?? '') ?></textarea>
   </div>
 
   <div class="aa-zone">
     <div class="aa-zone-lbl"><i class="fa-solid fa-paperclip"></i> Éléments de preuve</div>
-    <textarea name="preuves_disponibles" class="form-control" rows="4" placeholder="Listez les documents, liens ou éléments de preuve…"><?= e($critere['preuves_disponibles'] ?? '') ?></textarea>
-
-    <?php if ($pieces): ?>
-    <div style="margin-top:14px;">
-      <div class="id-section-label">Documents déjà joints</div>
-      <div class="id-pieces">
-        <?php foreach ($pieces as $p): ?>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
-          <a href="auto_download.php?id=<?= (int)$p['id'] ?>" class="id-piece" target="_blank">
-            <i class="fa-solid fa-file"></i> <?= e($p['nom_original']) ?>
-          </a>
-          <form method="post" action="actions.php" style="display:inline;" onsubmit="return confirm('Supprimer ce document ?');">
-            <?= csrf_field() ?>
-            <input type="hidden" name="action" value="supprimer_auto_piece">
-            <input type="hidden" name="piece_id" value="<?= (int)$p['id'] ?>">
-            <input type="hidden" name="critere_id" value="<?= $critere_id ?>">
-            <input type="hidden" name="en_mode_edit" value="1">
-            <button type="submit" class="btn btn-danger btn-sm" title="Supprimer"><i class="fa-solid fa-trash"></i></button>
-          </form>
-        </div>
-        <?php endforeach; ?>
-      </div>
-    </div>
-    <?php endif; ?>
+    <textarea name="preuves_disponibles" class="form-control aa-autosave-field" rows="4" placeholder="Listez les documents, liens ou éléments de preuve…"><?= e($critere['preuves_disponibles'] ?? '') ?></textarea>
 
     <div class="id-upzone" data-upzone style="margin-top:12px;">
       <input type="file" name="pieces[]" multiple class="id-upinput"
@@ -140,21 +119,49 @@ auto_anaq_ui_styles();
     <div class="id-upzone-list" data-upzone-list></div>
   </div>
 
+  <?php if (!$is_nombre): ?>
   <div class="aa-zone">
     <div class="aa-zone-lbl"><i class="fa-solid fa-star"></i> Niveau d'évaluation (0 à 5)</div>
     <div class="aa-score-row">
       <?php for ($s = 0; $s <= 5; $s++): ?>
       <label class="aa-score-opt">
-        <input type="radio" name="score" value="<?= $s ?>" <?= (int)($critere['score'] ?? -1) === $s ? 'checked' : '' ?>>
+        <input type="radio" name="score" class="aa-autosave-field" value="<?= $s ?>" <?= $score === $s ? 'checked' : '' ?>>
         <span class="aa-score-num"><?= $s ?></span>
         <span class="aa-score-lbl"><?= e($score_labels[$s]) ?></span>
       </label>
       <?php endfor; ?>
     </div>
   </div>
+  <?php endif; ?>
 
-  <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save"></i> Enregistrer</button>
+  <div class="aa-save-row">
+    <button type="submit" class="btn btn-primary"><i class="fa-solid fa-save"></i> Enregistrer</button>
+    <span class="aa-autosave-status" id="aa-autosave-status" aria-live="polite"></span>
+  </div>
 </form>
+
+<?php if ($pieces): ?>
+<div class="aa-zone">
+  <div class="id-section-label">Documents déjà joints</div>
+  <div class="id-pieces">
+    <?php foreach ($pieces as $p): ?>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
+      <a href="auto_download.php?id=<?= (int)$p['id'] ?>" class="id-piece" target="_blank">
+        <i class="fa-solid fa-file"></i> <?= e($p['nom_original']) ?>
+      </a>
+      <form method="post" action="actions.php" style="display:inline;" onsubmit="return confirm('Supprimer ce document ?');">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="supprimer_auto_piece">
+        <input type="hidden" name="piece_id" value="<?= (int)$p['id'] ?>">
+        <input type="hidden" name="critere_id" value="<?= $critere_id ?>">
+        <input type="hidden" name="en_mode_edit" value="1">
+        <button type="submit" class="btn btn-danger btn-sm" title="Supprimer"><i class="fa-solid fa-trash"></i></button>
+      </form>
+    </div>
+    <?php endforeach; ?>
+  </div>
+</div>
+<?php endif; ?>
 <?php else: ?>
 
 <div class="aa-zone">
@@ -180,11 +187,18 @@ auto_anaq_ui_styles();
   <?php endif; ?>
 </div>
 
-<?php if ($critere['score'] !== null && $critere['score'] !== ''): ?>
+<?php if (!$is_nombre): ?>
 <div class="aa-zone">
-  <div class="aa-zone-lbl"><i class="fa-solid fa-star"></i> Niveau</div>
-  <div class="aa-zone-body">
-    <strong><?= (int)$critere['score'] ?>/5</strong> — <?= e($score_labels[(int)$critere['score']] ?? '') ?>
+  <div class="aa-zone-lbl"><i class="fa-solid fa-star"></i> Niveau de maturité (0 à 5)</div>
+  <div class="aa-zone-body" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+    <span class="id-score" style="font-size:1.1rem;">
+      <?= identite_ui_score_etoiles($score) ?>
+      <?php if ($score !== null): ?>
+      <strong style="color:<?= identite_score_couleur($score) ?>"><?= $score ?>/5 — <?= e($score_labels[$score] ?? '') ?></strong>
+      <?php else: ?>
+      <span style="color:#94a3b8;font-size:.85rem;"><?= e(IDENTITE_A_COMPLETER) ?></span>
+      <?php endif; ?>
+    </span>
   </div>
 </div>
 <?php endif; ?>
@@ -193,12 +207,12 @@ auto_anaq_ui_styles();
 
 <div class="aa-nav-points">
   <?php if ($voisins['prev']): ?>
-  <a href="auto_point.php?id=<?= (int)$voisins['prev']['id'] ?><?= $edit_q ?>" class="btn btn-secondary">
+  <a href="auto_point.php?id=<?= (int)$voisins['prev']['id'] ?><?= $edit_q ?>" class="btn btn-secondary aa-nav-link" data-aa-nav="1">
     <i class="fa-solid fa-arrow-left"></i> <?= e($voisins['prev']['code']) ?>
   </a>
   <?php else: ?><span></span><?php endif; ?>
   <?php if ($voisins['next']): ?>
-  <a href="auto_point.php?id=<?= (int)$voisins['next']['id'] ?><?= $edit_q ?>" class="btn btn-secondary">
+  <a href="auto_point.php?id=<?= (int)$voisins['next']['id'] ?><?= $edit_q ?>" class="btn btn-secondary aa-nav-link" data-aa-nav="1">
     <?= e($voisins['next']['code']) ?> <i class="fa-solid fa-arrow-right"></i>
   </a>
   <?php endif; ?>
@@ -219,6 +233,6 @@ auto_anaq_ui_styles();
   }
 })();
 </script>
-<?php if ($mode_edit): identite_ui_script_upzone(); endif; ?>
+<?php if ($mode_edit): identite_ui_script_upzone(); identite_ui_script_autosave_point(); endif; ?>
 
 <?php include __DIR__ . '/../../views/layout/footer.php'; ?>

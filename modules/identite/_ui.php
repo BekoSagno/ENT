@@ -399,6 +399,130 @@ document.querySelectorAll('[data-upzone]').forEach(function (zone) {
     <?php
 }
 
+function identite_ui_script_autosave_point(): void {
+    ?>
+<script>
+(function () {
+  var form = document.getElementById('aa-form-point');
+  if (!form) return;
+
+  var statusEl = document.getElementById('aa-autosave-status');
+  var badgeEl  = document.getElementById('aa-statut-badge');
+  var timer    = null;
+  var inflight = null;
+  var dirty    = false;
+  var savedSnap = '';
+
+  function snapshot() {
+    var fd = new FormData(form);
+    fd.delete('action');
+    var parts = [];
+    fd.forEach(function (v, k) {
+      if (k === 'pieces[]') return;
+      parts.push(k + '=' + v);
+    });
+    return parts.sort().join('&');
+  }
+
+  savedSnap = snapshot();
+
+  function setStatus(cls, msg) {
+    if (!statusEl) return;
+    statusEl.className = 'aa-autosave-status' + (cls ? ' ' + cls : '');
+    statusEl.textContent = msg || '';
+  }
+
+  function updateBadge(label, cls) {
+    if (!badgeEl || !label) return;
+    badgeEl.textContent = label;
+    badgeEl.className = 'id-status ' + (cls || 'todo');
+  }
+
+  function save(done) {
+    if (inflight) {
+      inflight.then(function () { save(done); });
+      return;
+    }
+    var snap = snapshot();
+    if (snap === savedSnap) {
+      if (done) done(true);
+      return;
+    }
+
+    setStatus('saving', 'Enregistrement…');
+    var fd = new FormData(form);
+    fd.set('action', 'sauver_auto_point_ajax');
+
+    inflight = fetch('actions.php', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      inflight = null;
+      if (data && data.ok) {
+        savedSnap = snapshot();
+        dirty = false;
+        setStatus('ok', 'Enregistré');
+        updateBadge(data.statut_label, data.statut_class);
+        if (done) done(true);
+        setTimeout(function () {
+          if (!dirty && statusEl && statusEl.classList.contains('ok')) {
+            setStatus('', '');
+          }
+        }, 2500);
+      } else {
+        setStatus('err', (data && data.message) ? data.message : 'Erreur de sauvegarde');
+        if (done) done(false);
+      }
+    })
+    .catch(function () {
+      inflight = null;
+      setStatus('err', 'Connexion interrompue');
+      if (done) done(false);
+    });
+  }
+
+  function scheduleSave() {
+    dirty = true;
+    clearTimeout(timer);
+    timer = setTimeout(function () { save(null); }, 600);
+  }
+
+  form.querySelectorAll('.aa-autosave-field').forEach(function (el) {
+    el.addEventListener('input', scheduleSave);
+    el.addEventListener('change', scheduleSave);
+    el.addEventListener('blur', function () {
+      clearTimeout(timer);
+      save(null);
+    });
+  });
+
+  document.querySelectorAll('.aa-nav-link[data-aa-nav]').forEach(function (link) {
+    link.addEventListener('click', function (e) {
+      var href = link.getAttribute('href');
+      if (!href || snapshot() === savedSnap) return;
+      e.preventDefault();
+      clearTimeout(timer);
+      save(function (ok) {
+        if (ok) window.location.href = href;
+      });
+    });
+  });
+
+  window.addEventListener('beforeunload', function (e) {
+    if (dirty && snapshot() !== savedSnap) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+})();
+</script>
+    <?php
+}
+
 function identite_ui_swot_apercu_ligne(array $row): string {
     $cols = [
         ['forces',       'Forces',       'f'],
@@ -500,6 +624,11 @@ function auto_anaq_ui_styles(): void { ?>
 .aa-swot-val{font-size:.84rem;line-height:1.5;}
 .aa-swot-card{margin-top:28px;}
 .aa-pieces{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}
+.aa-save-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:4px;}
+.aa-autosave-status{font-size:.78rem;color:var(--text-muted);min-height:1.2em;}
+.aa-autosave-status.saving{color:var(--blue-600);}
+.aa-autosave-status.ok{color:#166534;}
+.aa-autosave-status.err{color:#b91c1c;}
 @media(max-width:640px){.aa-swot-grid{grid-template-columns:1fr;}.aa-score-row{grid-template-columns:repeat(3,1fr);}}
 </style>
 <?php }

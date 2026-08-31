@@ -68,7 +68,7 @@ auto_anaq_ui_styles();
           <div class="aa-prog-fill" style="width:<?= (int)$global['pct'] ?>%;"></div>
         </div>
         <div class="aa-prog-hero-hint">
-          <?= (int)$global['faits'] ?> / <?= (int)$global['total'] ?> points renseignés
+          <?= (int)$global['faits'] ?> / <?= (int)$global['total'] ?> points complétés
           <?php if ((int)$global['total'] > 0 && (int)$global['faits'] < (int)$global['total']): ?>
           · <?= (int)$global['total'] - (int)$global['faits'] ?> restant<?= ((int)$global['total'] - (int)$global['faits']) > 1 ? 's' : '' ?>
           <?php elseif ((int)$global['total'] > 0): ?>
@@ -169,7 +169,7 @@ identite_ui_recherche_panneau(
     <?php endif; ?>
     <div class="aa-prog">
       <div class="aa-prog-bar"><div class="aa-prog-fill" style="width:<?= (int)$comp['pct'] ?>%;"></div></div>
-      <span class="aa-prog-lbl"><?= (int)$comp['faits'] ?> / <?= (int)$comp['total'] ?> points renseignés</span>
+      <span class="aa-prog-lbl"><?= (int)$comp['faits'] ?> / <?= (int)$comp['total'] ?> points complétés</span>
     </div>
   </a>
   <?php endforeach; ?>

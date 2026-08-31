@@ -84,7 +84,7 @@ auto_anaq_ui_styles();
 
   <div class="spacer"></div>
 
-  <span class="aa-prog-lbl" style="font-size:.8rem;"><?= (int)$comp['faits'] ?> / <?= (int)$comp['total'] ?> renseignés</span>
+  <span class="aa-prog-lbl" style="font-size:.8rem;"><?= (int)$comp['faits'] ?> / <?= (int)$comp['total'] ?> complétés</span>
 
   <?php if ($peut_modifier && !$mode_edit): ?>
 
@@ -160,6 +160,10 @@ auto_anaq_ui_styles();
 
         $bd = auto_anaq_badge_statut($st);
 
+        $is_nombre = auto_anaq_critere_type_nombre($cr);
+
+        $score = $cr['score'] !== null && $cr['score'] !== '' ? (int)$cr['score'] : null;
+
     ?>
 
     <a href="auto_point.php?id=<?= (int)$cr['id'] ?><?= $edit_q ?>" class="aa-point-row">
@@ -168,7 +172,16 @@ auto_anaq_ui_styles();
 
       <span class="aa-point-titre"><?= e(auto_anaq_titre_court(auto_anaq_libelle_critere($cr), 90)) ?></span>
 
-      <span class="aa-badge" style="background:<?= $bd[1] ?>;color:<?= $bd[2] ?>;"><?= e($bd[0]) ?></span>
+      <?php if (!$is_nombre): ?>
+      <span class="id-score" style="font-size:.78rem;">
+        <?= identite_ui_score_etoiles($score) ?>
+        <?php if ($score !== null): ?>
+        <span style="color:<?= identite_score_couleur($score) ?>"><?= $score ?>/5</span>
+        <?php endif; ?>
+      </span>
+      <?php endif; ?>
+
+      <span class="id-status <?= e($bd[1]) ?>"><?= e($bd[0]) ?></span>
 
       <i class="fa-solid fa-chevron-right aa-point-arrow"></i>
 

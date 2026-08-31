@@ -10,14 +10,21 @@ require_once __DIR__ . '/../../models/auto_anaq.php';
 session_demarrer();
 exiger_connexion();
 
+$action  = clean($_POST['action'] ?? '');
+$is_ajax = ($action === 'sauver_auto_point_ajax');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !csrf_verify()) {
+    if ($is_ajax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Session expirée. Reconnectez-vous.']);
+        exit;
+    }
     set_flash('error', 'Requête invalide.');
     redirect('/modules/identite/index.php');
 }
 
 exiger_permission('IDENTITE_CRICT', 'MODIFIER');
 
-$action   = clean($_POST['action'] ?? '');
 $champ_id = (int)($_POST['champ_id'] ?? 1);
 
 switch ($action) {
@@ -170,46 +177,29 @@ switch ($action) {
 
     case 'sauver_auto_point':
         $critere_id = (int)($_POST['critere_id'] ?? 0);
-        $champ_id_a = (int)($_POST['champ_id'] ?? 0);
-        $score_raw  = $_POST['score'] ?? '';
-        $score      = ($score_raw !== '' && $score_raw !== null) ? (int)$score_raw : null;
         $en_edit    = !empty($_POST['en_mode_edit']);
         $suffix     = $en_edit ? '&edit=1' : '';
 
-        if ($critere_id <= 0) {
-            set_flash('error', 'Point invalide.');
-            redirect('/modules/identite/referentiel.php');
+        $res = auto_anaq_point_sauver($critere_id, true, true);
+        if (!$res['ok']) {
+            set_flash('error', $res['message']);
+            redirect('/modules/identite/auto_point.php?id=' . max(1, $critere_id) . $suffix);
             break;
         }
-
-        $existant = auto_anaq_critere_par_id($critere_id);
-        if (!auto_anaq_contenu_sauver(
-            $critere_id,
-            $_POST['reponse'] ?? '',
-            $_POST['preuves_disponibles'] ?? '',
-            $score,
-            $existant['commentaire'] ?? ''
-        )) {
-            set_flash('error', 'Erreur lors de l\'enregistrement.');
-            redirect('/modules/identite/auto_point.php?id=' . $critere_id . $suffix);
-            break;
+        if (!empty($res['upload_errs'])) {
+            set_flash('error', 'Certains fichiers non ajoutés — ' . implode(' ; ', $res['upload_errs']));
+        } else {
+            set_flash('success', $res['message']);
         }
-
-        if (!empty($_FILES['pieces']['name'][0])) {
-            foreach ($_FILES['pieces']['name'] as $k => $nom) {
-                if (($_FILES['pieces']['error'][$k] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) continue;
-                $fk = [
-                    'name' => $nom, 'tmp_name' => $_FILES['pieces']['tmp_name'][$k],
-                    'error' => $_FILES['pieces']['error'][$k], 'size' => $_FILES['pieces']['size'][$k],
-                ];
-                $r = auto_anaq_piece_ajouter($critere_id, $fk);
-                if (!$r['succes']) set_flash('error', $nom . ' : ' . ($r['message'] ?? 'erreur'));
-            }
-        }
-
-        set_flash('success', 'Point enregistré.');
         redirect('/modules/identite/auto_point.php?id=' . $critere_id . $suffix);
         break;
+
+    case 'sauver_auto_point_ajax':
+        header('Content-Type: application/json; charset=utf-8');
+        $critere_id = (int)($_POST['critere_id'] ?? 0);
+        $res = auto_anaq_point_sauver($critere_id, false, false);
+        echo json_encode($res, JSON_UNESCAPED_UNICODE);
+        exit;
 
     case 'sauver_auto_swot':
         $champ_id_a = (int)($_POST['champ_id'] ?? 0);
