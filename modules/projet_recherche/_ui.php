@@ -5,15 +5,39 @@ function recherche_ui_styles(): void { ?>
 <style>
 /* ── Liste projets ── */
 .pr-wrap{max-width:960px;margin:0 auto;}
-.pr-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:18px;}
-.pr-toolbar .spacer{flex:1;}
+.pr-toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:18px;}
+.pr-toolbar .spacer{flex:1;min-width:8px;}
+.pr-toolbar-filters{
+  display:flex;align-items:center;gap:0;
+  background:#fff;border:1.5px solid #d8e0ea;border-radius:10px;overflow:hidden;
+  max-width:100%;
+}
+.pr-toolbar-filters .pr-q{
+  width:220px;max-width:42vw;min-width:140px;border:none;border-radius:0;
+  padding:9px 12px 9px 36px;box-shadow:none;background:transparent;
+}
+.pr-toolbar-filters .pr-q:focus{outline:none;box-shadow:none;}
+.pr-toolbar-filters .pr-st{
+  width:auto;min-width:150px;border:none;border-left:1px solid #e2e8f0;border-radius:0;
+  padding:9px 12px;box-shadow:none;background:#f8fafc;
+}
+.pr-toolbar-filters .pr-st:focus{outline:none;box-shadow:none;}
+.pr-toolbar-filters .pr-go{
+  border:none;border-left:1px solid #e2e8f0;border-radius:0;
+  background:#f1f5f9;color:#334155;padding:9px 14px;cursor:pointer;
+}
+.pr-toolbar-filters .pr-go:hover{background:#e2e8f0;color:#0f172a;}
+.pr-toolbar-search-wrap{position:relative;display:flex;align-items:center;}
+.pr-toolbar-search-wrap > i{
+  position:absolute;left:12px;color:#94a3b8;font-size:.8rem;pointer-events:none;
+}
 .pr-list-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;}
 .pr-list-card{
   display:flex;flex-direction:column;gap:10px;
   background:#fff;border:1px solid #d8e0ea;border-radius:12px;padding:16px 18px;
-  text-decoration:none;color:inherit;transition:border-color .12s,box-shadow .12s;
+  color:inherit;transition:border-color .12s,box-shadow .12s;
 }
-.pr-list-card:hover{border-color:#93c5fd;box-shadow:0 4px 16px rgba(13,50,120,.08);text-decoration:none;color:inherit;}
+.pr-list-card:hover{border-color:#93c5fd;box-shadow:0 4px 16px rgba(13,50,120,.08);}
 .pr-list-top{display:flex;justify-content:space-between;align-items:center;gap:8px;}
 .pr-list-code{font-size:.72rem;font-weight:700;color:#64748b;letter-spacing:.02em;}
 .pr-list-badge{display:inline-flex;padding:3px 9px;border-radius:6px;font-size:.7rem;font-weight:700;}
@@ -23,6 +47,7 @@ function recherche_ui_styles(): void { ?>
 .pr-prog{height:6px;background:#e2e8f0;border-radius:4px;overflow:hidden;}
 .pr-prog-fill{height:100%;background:#2563eb;border-radius:4px;}
 .pr-list-meta{font-size:.72rem;color:#64748b;margin-top:auto;}
+.pr-list-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-top:4px;border-top:1px solid #eef2f7;margin-top:2px;}
 
 .pr-page{max-width:1100px;margin:0 auto;padding-bottom:40px;}
 .pr-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;

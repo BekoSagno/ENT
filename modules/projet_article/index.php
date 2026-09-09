@@ -1,0 +1,112 @@
+<?php
+// modules/projet_article/index.php — Liste des articles scientifiques
+require_once __DIR__ . '/../../config/config.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../includes/helpers.php';
+require_once __DIR__ . '/../../includes/auth.php';
+require_once __DIR__ . '/../../models/projet_article.php';
+require_once __DIR__ . '/_ui.php';
+
+session_demarrer();
+exiger_permission(ARTICLE_MODULE, 'VOIR');
+article_assurer_schema();
+
+$peut_creer = a_permission(ARTICLE_MODULE, 'CREER') || article_peut_gerer();
+$f = [
+    'statut' => clean($_GET['statut'] ?? ''),
+    'q'      => clean($_GET['q'] ?? ''),
+];
+$page = max(1, (int)($_GET['page'] ?? 1));
+$res = article_lister($f, 12, ($page - 1) * 12);
+$statuts = article_statut_cfg();
+
+$page_titre = 'Article scientifique';
+$page_breadcrumb = 'Projets · Article scientifique';
+$module_actif = 'PROJETS';
+$projet_sous_actif = 'ARTICLE';
+
+include __DIR__ . '/../../views/layout/header.php';
+article_ui_styles();
+?>
+
+<div class="pa-wrap">
+  <div class="pa-toolbar">
+    <?php if ($peut_creer): ?>
+    <a href="creer.php" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Nouvel article</a>
+    <?php endif; ?>
+    <div class="spacer"></div>
+    <form method="get" class="pa-toolbar-filters" role="search">
+      <div class="pa-toolbar-search-wrap">
+        <i class="fa-solid fa-search" aria-hidden="true"></i>
+        <input type="text" name="q" class="form-control pa-q"
+               value="<?= e($f['q']) ?>" placeholder="Rechercher…" aria-label="Rechercher">
+      </div>
+      <select name="statut" class="form-control pa-st" aria-label="Statut">
+        <option value="">Tous les statuts</option>
+        <?php foreach ($statuts as $k => $s): ?>
+        <option value="<?= e($k) ?>" <?= $f['statut'] === $k ? 'selected' : '' ?>><?= e($s[0]) ?></option>
+        <?php endforeach; ?>
+      </select>
+      <button type="submit" class="pa-go" title="Filtrer"><i class="fa-solid fa-filter"></i></button>
+    </form>
+  </div>
+
+  <?php if (!$res['data']): ?>
+  <div class="card">
+    <div class="card-body" style="text-align:center;padding:40px 20px;color:var(--text-muted);">
+      <i class="fa-solid fa-newspaper" style="font-size:2rem;opacity:.4;margin-bottom:12px;"></i>
+      <p style="margin:0;">Aucun article pour le moment.</p>
+      <?php if ($peut_creer): ?>
+      <a href="creer.php" class="btn btn-primary btn-sm" style="margin-top:14px;">Créer un article</a>
+      <?php endif; ?>
+    </div>
+  </div>
+  <?php else: ?>
+  <div class="pa-list-grid">
+    <?php foreach ($res['data'] as $d):
+        [$lbl, $bg, $co] = $statuts[$d['statut']] ?? $statuts['BROUILLON'];
+        $pct = (int)$d['pct_complet'];
+        $peut_mod_card = article_peut_modifier($d);
+    ?>
+    <div class="pa-list-card">
+      <div class="pa-list-top">
+        <span class="pa-list-code"><?= e($d['code']) ?></span>
+        <span class="pa-list-badge" style="background:<?= $bg ?>;color:<?= $co ?>;"><?= e($lbl) ?></span>
+      </div>
+      <h3 class="pa-list-titre"><?= e($d['titre']) ?></h3>
+      <div>
+        <div class="pa-list-prog-row">
+          <span>Avancement</span>
+          <strong><?= $pct ?> %</strong>
+        </div>
+        <div class="pa-prog"><div class="pa-prog-fill" style="width:<?= $pct ?>%;"></div></div>
+      </div>
+      <div class="pa-list-meta">
+        <?= e($d['auteur_nom'] ?? '—') ?>
+        <?php if (!empty($d['modifie_le'])): ?>
+        · maj <?= format_datetime($d['modifie_le']) ?>
+        <?php endif; ?>
+      </div>
+      <div class="pa-list-actions">
+        <a href="editer.php?id=<?= (int)$d['id'] ?>" class="btn btn-primary btn-sm">
+          <i class="fa-solid fa-pen"></i> Éditer
+        </a>
+        <?php if ($peut_mod_card): ?>
+        <form method="post" action="actions.php" style="margin:0;"
+              onsubmit="return confirm('Supprimer définitivement cet article ?');">
+          <?= csrf_field() ?>
+          <input type="hidden" name="action" value="supprimer">
+          <input type="hidden" name="id" value="<?= (int)$d['id'] ?>">
+          <button type="submit" class="btn btn-secondary btn-sm" style="color:#dc2626;border-color:#fecaca;">
+            <i class="fa-solid fa-trash"></i> Supprimer
+          </button>
+        </form>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php endforeach; ?>
+  </div>
+  <?php endif; ?>
+</div>
+
+<?php include __DIR__ . '/../../views/layout/footer.php'; ?>

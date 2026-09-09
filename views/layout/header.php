@@ -623,6 +623,10 @@ $module_actif  = $module_actif ?? '';
            class="nav-subitem <?= $proj_sous === 'RECHERCHE' ? 'active' : '' ?>">
           <i class="fa-solid fa-file-lines"></i> Projet de recherche
         </a>
+        <a href="<?= APP_URL ?>/modules/projet_article/index.php"
+           class="nav-subitem <?= $proj_sous === 'ARTICLE' ? 'active' : '' ?>">
+          <i class="fa-solid fa-newspaper"></i> Article scientifique
+        </a>
       </div>
     </div>
     <?php endif; ?>

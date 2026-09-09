@@ -36,16 +36,19 @@ recherche_ui_styles();
     <a href="creer.php" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Nouveau projet</a>
     <?php endif; ?>
     <div class="spacer"></div>
-    <form method="get" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <input type="text" name="q" class="form-control" style="min-width:200px;"
-             value="<?= e($f['q']) ?>" placeholder="Rechercher…">
-      <select name="statut" class="form-control">
+    <form method="get" class="pr-toolbar-filters" role="search">
+      <div class="pr-toolbar-search-wrap">
+        <i class="fa-solid fa-search" aria-hidden="true"></i>
+        <input type="text" name="q" class="form-control pr-q"
+               value="<?= e($f['q']) ?>" placeholder="Rechercher…" aria-label="Rechercher">
+      </div>
+      <select name="statut" class="form-control pr-st" aria-label="Statut">
         <option value="">Tous les statuts</option>
         <?php foreach ($statuts as $k => $s): ?>
         <option value="<?= e($k) ?>" <?= $f['statut'] === $k ? 'selected' : '' ?>><?= e($s[0]) ?></option>
         <?php endforeach; ?>
       </select>
-      <button type="submit" class="btn btn-secondary btn-sm"><i class="fa-solid fa-search"></i></button>
+      <button type="submit" class="pr-go" title="Filtrer"><i class="fa-solid fa-filter"></i></button>
     </form>
   </div>
 
@@ -64,8 +67,9 @@ recherche_ui_styles();
     <?php foreach ($res['data'] as $d):
         [$lbl, $bg, $co] = $statuts[$d['statut']] ?? $statuts['BROUILLON'];
         $pct = (int)$d['pct_complet'];
+        $peut_mod_card = recherche_peut_modifier($d);
     ?>
-    <a href="editer.php?id=<?= (int)$d['id'] ?>" class="pr-list-card">
+    <div class="pr-list-card">
       <div class="pr-list-top">
         <span class="pr-list-code"><?= e($d['code']) ?></span>
         <span class="pr-list-badge" style="background:<?= $bg ?>;color:<?= $co ?>;"><?= e($lbl) ?></span>
@@ -84,7 +88,23 @@ recherche_ui_styles();
         · maj <?= format_datetime($d['modifie_le']) ?>
         <?php endif; ?>
       </div>
-    </a>
+      <div class="pr-list-actions">
+        <a href="editer.php?id=<?= (int)$d['id'] ?>" class="btn btn-primary btn-sm">
+          <i class="fa-solid fa-pen"></i> Éditer
+        </a>
+        <?php if ($peut_mod_card): ?>
+        <form method="post" action="actions.php" style="margin:0;"
+              onsubmit="return confirm('Supprimer définitivement ce projet ?');">
+          <?= csrf_field() ?>
+          <input type="hidden" name="action" value="supprimer">
+          <input type="hidden" name="id" value="<?= (int)$d['id'] ?>">
+          <button type="submit" class="btn btn-secondary btn-sm" style="color:#dc2626;border-color:#fecaca;">
+            <i class="fa-solid fa-trash"></i> Supprimer
+          </button>
+        </form>
+        <?php endif; ?>
+      </div>
+    </div>
     <?php endforeach; ?>
   </div>
   <?php endif; ?>
