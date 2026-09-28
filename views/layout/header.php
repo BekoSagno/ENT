@@ -204,11 +204,11 @@ body {
 .collapsed .nav-caret { display: none; }
 .collapsed .nav-sub { display: none; }
 
-/* Badge */
+/* Badge (ex. Rapport Quotidien, Mes demandes) */
 .nav-badge {
   margin-left: auto;
   background: var(--accent);
-  color: var(--blue-950);
+  color: #fff;
   font-size: .65rem; font-weight: 800;
   border-radius: 20px;
   padding: 2px 7px;
@@ -771,10 +771,34 @@ $module_actif  = $module_actif ?? '';
 
     <?php if (user_id()): ?>
     <div class="nav-section-label">Mes demandes, profil RH</div>
-    <a href="<?= APP_URL ?>/modules/demandes/demandes.php"
+    <?php
+      // Badge comme « Rapport Quotidien » : nombre de demandes en attente (côté DG),
+      // sinon notifications non lues (retour DG → demandeur).
+      $dm_nav_n = 0;
+      if (is_file(APP_ROOT . '/models/demandes.php')) {
+          require_once APP_ROOT . '/models/personnel.php';
+          require_once APP_ROOT . '/models/demandes.php';
+          try {
+              $dm_uid = (int)user_id();
+              $dm_pid = personnel_assurer_profil($dm_uid);
+              $dm_peut_rh = a_permission('PERSONNEL', 'VALIDER');
+              $dm_est_dg  = demandes_est_dg();
+              $dm_nav_n   = demandes_compte_a_valider($dm_pid, $dm_peut_rh, $dm_est_dg);
+              if ($dm_nav_n <= 0) {
+                  $dm_nav_n = demandes_notifs_non_lues($dm_uid);
+              }
+          } catch (Throwable $e) {
+              $dm_nav_n = 0;
+          }
+      }
+    ?>
+    <a href="<?= APP_URL ?>/modules/demandes/demandes.php<?= $dm_nav_n > 0 ? '?voir_alerte=1' : '' ?>"
        class="nav-item <?= ($module_actif ?? '') === 'PERSONNEL_DEMANDES' ? 'active' : '' ?>">
       <span class="icon"><i class="fa-solid fa-inbox"></i></span>
       <span class="label">Mes demandes</span>
+      <?php if ($dm_nav_n > 0): ?>
+        <span class="nav-badge"><?= (int)$dm_nav_n ?></span>
+      <?php endif; ?>
     </a>
     <a href="<?= APP_URL ?>/profil.php"
        class="nav-item">
@@ -860,21 +884,6 @@ $module_actif  = $module_actif ?? '';
         <i class="fa-regular fa-calendar"></i>
         <?= strftime_fr(date('Y-m-d')) ?>
       </div>
-      <?php
-        $rdv_notif_n = 0;
-        if (user_id() && is_file(APP_ROOT . '/models/rendezvous_dg.php')) {
-            require_once APP_ROOT . '/models/rendezvous_dg.php';
-            try { $rdv_notif_n = rdv_dg_notifs_non_lues((int)user_id()); } catch (Throwable $e) {}
-        }
-      ?>
-      <?php if (user_id()): ?>
-      <a href="<?= APP_URL ?>/modules/rendezvous_dg/notifications.php" class="topbar-btn" title="Notifications rendez-vous">
-        <i class="fa-solid fa-bell"></i>
-        <?php if ($rdv_notif_n > 0): ?>
-          <span class="rdv-notif-dot"><?= $rdv_notif_n > 9 ? '9+' : (int)$rdv_notif_n ?></span>
-        <?php endif; ?>
-      </a>
-      <?php endif; ?>
       <a href="<?= APP_URL ?>/modules/suivi/index.php" class="topbar-btn" title="Ma fiche du jour">
         <i class="fa-solid fa-calendar-check"></i>
       </a>

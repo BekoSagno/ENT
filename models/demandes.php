@@ -236,6 +236,23 @@ function demandes_assurer_schema(): void {
         error_log('[CRICT demandes] Table demandes_mission_agents inaccessible : ' . $e->getMessage()
             . ' — supprimer le fichier orphelin data/crict_ent/demandes_mission_agents.ibd (MySQL arrêté) puis relancer.');
     }
+
+    try {
+        $db->exec("CREATE TABLE IF NOT EXISTS demandes_notifications (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            utilisateur_id INT UNSIGNED NOT NULL,
+            demande_id INT UNSIGNED DEFAULT NULL,
+            titre VARCHAR(200) NOT NULL,
+            message TEXT NOT NULL,
+            lu TINYINT(1) NOT NULL DEFAULT 0,
+            cree_le DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_dm_notif_user (utilisateur_id, lu),
+            KEY idx_dm_notif_demande (demande_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    } catch (Throwable $e) {
+        error_log('[CRICT demandes] schema notif : ' . $e->getMessage());
+    }
 }
 
 function demandes_est_dg(): bool {
@@ -310,7 +327,7 @@ function demandes_ligne_agent(array $p): string {
 function demandes_mission_agents(int $demande_id): array {
     demandes_assurer_schema();
     $stmt = get_db()->prepare("
-        SELECT a.personnel_id, a.ordre, p.fonction, p.nationalite, p.matricule_rh,
+        SELECT a.personnel_id, a.ordre, p.fonction, p.nationalite, p.matricule_rh, p.utilisateur_id,
                u.nom, u.prenoms, u.genre, u.grade, u.matricule
         FROM demandes_mission_agents a
         JOIN personnel p ON p.id = a.personnel_id
@@ -344,6 +361,29 @@ function demandes_mission_peut_acceder(array $d, int $personnel_id, bool $peut_r
         if ((int)$a['personnel_id'] === $personnel_id) return true;
     }
     return false;
+}
+
+/** Accès à la fiche détail d'une demande (demandeur, agents mission, RH/DG, valideur). */
+function demandes_peut_voir_detail(array $d, int $utilisateur_id, int $personnel_id, bool $peut_rh, bool $est_dg): bool {
+    if ($peut_rh || $est_dg) return true;
+    if ((int)($d['personnel_id'] ?? 0) === $personnel_id) return true;
+    if ((int)($d['valide_par'] ?? 0) === $utilisateur_id) return true;
+    if ((int)($d['valide_resp_par'] ?? 0) === $utilisateur_id) return true;
+    if ((int)($d['valide_dg_par'] ?? 0) === $utilisateur_id) return true;
+    if (($d['categorie'] ?? '') === 'MISSION') {
+        foreach (demandes_mission_agents((int)$d['id']) as $a) {
+            if ((int)$a['personnel_id'] === $personnel_id) return true;
+        }
+    }
+    return false;
+}
+
+/** Nom d'un utilisateur (valideur). */
+function demandes_nom_utilisateur(?int $utilisateur_id): string {
+    if (!$utilisateur_id) return '';
+    $st = get_db()->prepare("SELECT CONCAT_WS(' ', prenoms, nom) FROM utilisateurs WHERE id = ?");
+    $st->execute([$utilisateur_id]);
+    return trim((string)$st->fetchColumn());
 }
 
 function demandes_personnel_actifs_pour_mission(): array {
@@ -492,6 +532,7 @@ function demandes_creer_conge(int $personnel_id, string $type_code, string $debu
     ")->execute([$personnel_id, $ref, $sous_type, $debut, $fin, $jours, $motif !== '' ? $motif : null]);
     $id = (int)get_db()->lastInsertId();
     log_activite(user_id(), 'PERSONNEL', 'DEMANDE_CONGE', "Demande congé ID $id");
+    demandes_notifier_evenement($id, 'creee');
     return ['succes' => true, 'id' => $id];
 }
 
@@ -521,6 +562,7 @@ function demandes_creer_absence(int $personnel_id, string $type_code, string $de
     ")->execute([$personnel_id, $ref, $sous_type, $debut, $fin, $jours, $motif !== '' ? $motif : null]);
     $id = (int)get_db()->lastInsertId();
     log_activite(user_id(), 'PERSONNEL', 'DEMANDE_ABSENCE', "Demande absence ID $id");
+    demandes_notifier_evenement($id, 'creee');
     return ['succes' => true, 'id' => $id];
 }
 
@@ -585,6 +627,7 @@ function demandes_creer_mission(int $personnel_id, array $data): array {
         return ['succes' => false, 'message' => 'Erreur lors de l\'enregistrement.'];
     }
     log_activite(user_id(), 'PERSONNEL', 'DEMANDE_MISSION', "Ordre de mission ID $id (" . count($agent_ids) . " agent(s))");
+    demandes_notifier_evenement($id, 'creee');
     return ['succes' => true, 'id' => $id];
 }
 
@@ -658,14 +701,19 @@ function demandes_valider_resp(int $id, string $commentaire = ''): array {
                 commentaire_validation=? WHERE id=?
         ")->execute([$uid, $commentaire !== '' ? $commentaire : null, $id]);
         log_activite($uid, 'PERSONNEL', 'DEMANDE_VISA_RESP', "Mission ID $id visée responsable");
+        demandes_notifier_evenement($id, 'visa_resp');
         return ['succes' => true, 'message' => 'Visa responsable enregistré — en attente du DG.'];
     }
 
     if ($d['categorie'] === 'CONGE') {
-        return demandes_approuver_conge($id, $uid, $commentaire);
+        $r = demandes_approuver_conge($id, $uid, $commentaire);
+        if (!empty($r['succes'])) demandes_notifier_evenement($id, 'approuvee');
+        return $r;
     }
 
-    return demandes_approuver_absence($id, $uid, $commentaire);
+    $r = demandes_approuver_absence($id, $uid, $commentaire);
+    if (!empty($r['succes'])) demandes_notifier_evenement($id, 'approuvee');
+    return $r;
 }
 
 // Approbation d'une absence : décompte sur le quota unique de repos.
@@ -732,6 +780,7 @@ function demandes_valider_dg(int $id, string $commentaire = ''): array {
         }
     }
     log_activite($uid, 'PERSONNEL', 'MISSION_APPROUVE', "Mission ID $id approuvée par DG — $num");
+    demandes_notifier_evenement($id, 'approuvee');
     return ['succes' => true, 'ordre_numero' => $num];
 }
 
@@ -744,6 +793,7 @@ function demandes_refuser(int $id, string $commentaire = ''): array {
     get_db()->prepare("UPDATE demandes_conges SET statut='REFUSE', valide_par=?, commentaire_validation=? WHERE id=?")
             ->execute([user_id(), $commentaire !== '' ? $commentaire : null, $id]);
     log_activite(user_id(), 'PERSONNEL', 'DEMANDE_REFUSE', "Demande ID $id refusée");
+    demandes_notifier_evenement($id, 'refusee');
     return ['succes' => true];
 }
 
@@ -774,9 +824,465 @@ function demandes_annuler(int $id, int $personnel_id): array {
 
     $db->prepare("UPDATE demandes_conges SET statut='ANNULE' WHERE id=?")->execute([$id]);
     log_activite(user_id(), 'PERSONNEL', 'DEMANDE_ANNULE', "Demande ID $id annulée");
+    demandes_notifier_evenement($id, 'annulee');
     return ['succes' => true];
 }
 
 function demandes_compte_a_valider(int $validateur_pid, bool $peut_rh, bool $est_dg): int {
     return count(demandes_a_valider($validateur_pid, $peut_rh, $est_dg));
+}
+
+/** Historique des demandes traitées par un validateur (RH / responsable / DG). */
+function demandes_lister_traitees_par(int $utilisateur_id, int $limite = 80): array {
+    if ($utilisateur_id <= 0) return [];
+    demandes_assurer_schema();
+    $limite = max(1, min(200, $limite));
+    $stmt = get_db()->prepare("
+        SELECT d.*, t.libelle AS type_conge_libelle, m.destination, m.objet_mission, m.ordre_mission_numero,
+               CONCAT_WS(' ', u.prenoms, u.nom) AS employe_nom
+        FROM demandes_conges d
+        LEFT JOIN types_conges t ON t.id = d.type_id
+        LEFT JOIN demandes_mission m ON m.demande_id = d.id
+        JOIN personnel p ON p.id = d.personnel_id
+        JOIN utilisateurs u ON u.id = p.utilisateur_id
+        WHERE d.statut IN ('APPROUVE','REFUSE')
+          AND (d.valide_par = ? OR d.valide_resp_par = ? OR d.valide_dg_par = ?)
+        ORDER BY COALESCE(d.valide_dg_le, d.valide_resp_le, d.cree_le) DESC
+        LIMIT $limite
+    ");
+    $stmt->execute([$utilisateur_id, $utilisateur_id, $utilisateur_id]);
+    $rows = $stmt->fetchAll() ?: [];
+    foreach ($rows as &$r) {
+        $r['type_libelle'] = demandes_type_libelle($r);
+    }
+    return $rows;
+}
+
+// ─── Notifications internes + e-mails ─────────────────────────
+
+function demandes_notif_creer(int $utilisateur_id, string $titre, string $message, ?int $demande_id = null): void {
+    if ($utilisateur_id <= 0) return;
+    try {
+        demandes_assurer_schema();
+        get_db()->prepare("
+            INSERT INTO demandes_notifications (utilisateur_id, demande_id, titre, message)
+            VALUES (?,?,?,?)
+        ")->execute([$utilisateur_id, $demande_id, $titre, $message]);
+    } catch (Throwable $e) {
+        error_log('[CRICT demandes] notif : ' . $e->getMessage());
+    }
+}
+
+function demandes_notifs_non_lues(int $utilisateur_id): int {
+    if ($utilisateur_id <= 0) return 0;
+    demandes_assurer_schema();
+    try {
+        $st = get_db()->prepare("SELECT COUNT(*) FROM demandes_notifications WHERE utilisateur_id = ? AND lu = 0");
+        $st->execute([$utilisateur_id]);
+        return (int)$st->fetchColumn();
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+function demandes_notifs_lister(int $utilisateur_id, int $limite = 40): array {
+    if ($utilisateur_id <= 0) return [];
+    demandes_assurer_schema();
+    $limite = max(1, min(100, $limite));
+    try {
+        $st = get_db()->prepare("
+            SELECT * FROM demandes_notifications
+            WHERE utilisateur_id = ?
+            ORDER BY cree_le DESC LIMIT $limite
+        ");
+        $st->execute([$utilisateur_id]);
+        return $st->fetchAll() ?: [];
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function demandes_notif_marquer_lu(int $id, int $utilisateur_id): void {
+    get_db()->prepare("UPDATE demandes_notifications SET lu = 1 WHERE id = ? AND utilisateur_id = ?")
+        ->execute([$id, $utilisateur_id]);
+}
+
+function demandes_notif_tout_lu(int $utilisateur_id): void {
+    get_db()->prepare("UPDATE demandes_notifications SET lu = 1 WHERE utilisateur_id = ? AND lu = 0")
+        ->execute([$utilisateur_id]);
+}
+
+/** Première notification non lue (la plus récente). */
+function demandes_notif_premiere_non_lue(int $utilisateur_id): ?array {
+    if ($utilisateur_id <= 0) return null;
+    demandes_assurer_schema();
+    try {
+        $st = get_db()->prepare("
+            SELECT * FROM demandes_notifications
+            WHERE utilisateur_id = ? AND lu = 0
+            ORDER BY cree_le DESC LIMIT 1
+        ");
+        $st->execute([$utilisateur_id]);
+        $row = $st->fetch();
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/** Marque comme lues toutes les notifs liées à une demande (ou toutes si id=0). */
+function demandes_notif_marquer_demande_lue(int $utilisateur_id, int $demande_id = 0): void {
+    if ($utilisateur_id <= 0) return;
+    if ($demande_id > 0) {
+        get_db()->prepare("
+            UPDATE demandes_notifications SET lu = 1
+            WHERE utilisateur_id = ? AND lu = 0 AND demande_id = ?
+        ")->execute([$utilisateur_id, $demande_id]);
+    } else {
+        demandes_notif_tout_lu($utilisateur_id);
+    }
+}
+
+/**
+ * Calcule l'URL de focus pour une alerte (historique / à valider).
+ * @return array{url:string,demande_id:int,notif:?array}
+ */
+function demandes_alerte_cible(int $utilisateur_id, int $personnel_id, bool $peut_rh, bool $est_dg): array {
+    $base = '/modules/demandes/demandes.php';
+    $notif = demandes_notif_premiere_non_lue($utilisateur_id);
+    $demande_id = (int)($notif['demande_id'] ?? 0);
+    $a_valider = demandes_a_valider($personnel_id, $peut_rh, $est_dg);
+    $ids_a_valider = array_map(fn($r) => (int)$r['id'], $a_valider);
+
+    if ($demande_id > 0) {
+        $d = demandes_par_id($demande_id);
+        if ($d) {
+            $statut = $d['statut'] ?? '';
+            if (in_array($demande_id, $ids_a_valider, true)
+                || (in_array($statut, ['EN_ATTENTE', 'EN_ATTENTE_DG'], true) && ($peut_rh || $est_dg))
+            ) {
+                return [
+                    'url' => $base . '?tab=valider&focus=' . $demande_id,
+                    'demande_id' => $demande_id,
+                    'notif' => $notif,
+                ];
+            }
+            if (in_array($statut, ['APPROUVE', 'REFUSE'], true) && ($peut_rh || $est_dg)
+                && (
+                    (int)($d['valide_par'] ?? 0) === $utilisateur_id
+                    || (int)($d['valide_resp_par'] ?? 0) === $utilisateur_id
+                    || (int)($d['valide_dg_par'] ?? 0) === $utilisateur_id
+                )
+            ) {
+                return [
+                    'url' => $base . '?tab=historique_val&focus=' . $demande_id,
+                    'demande_id' => $demande_id,
+                    'notif' => $notif,
+                ];
+            }
+            return [
+                'url' => $base . '?tab=mes&cat=historique&focus=' . $demande_id,
+                'demande_id' => $demande_id,
+                'notif' => $notif,
+            ];
+        }
+    }
+
+    if ($a_valider) {
+        $did = (int)$a_valider[0]['id'];
+        return [
+            'url' => $base . '?tab=valider&focus=' . $did,
+            'demande_id' => $did,
+            'notif' => $notif,
+        ];
+    }
+
+    if ($notif) {
+        return [
+            'url' => $base . '?tab=mes&cat=historique',
+            'demande_id' => 0,
+            'notif' => $notif,
+        ];
+    }
+
+    return ['url' => $base, 'demande_id' => 0, 'notif' => null];
+}
+
+function demandes_mail_charger(): void {
+    if (!function_exists('envoyer_email')) {
+        require_once APP_ROOT . '/includes/mailer.php';
+    }
+}
+
+function demandes_email_gabarit(string $titre, string $contenu, ?array $badge = null): string {
+    $badge_html = '';
+    if ($badge) {
+        $badge_html = '<tr><td style="padding:0 32px;">'
+            . '<span style="display:inline-block;padding:6px 16px;border-radius:20px;'
+            . 'font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;'
+            . 'background:' . htmlspecialchars($badge['bg']) . ';color:' . htmlspecialchars($badge['color']) . ';">'
+            . htmlspecialchars($badge['label']) . '</span></td></tr>'
+            . '<tr><td style="height:14px;"></td></tr>';
+    }
+    return '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"></head>'
+        . '<body style="margin:0;padding:0;background:#eef2f9;">'
+        . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef2f9;padding:28px 12px;">'
+        . '<tr><td align="center">'
+        . '<table role="presentation" width="600" cellpadding="0" cellspacing="0" '
+        . 'style="max-width:600px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;'
+        . 'font-family:\'Segoe UI\',Arial,sans-serif;box-shadow:0 12px 40px rgba(3,20,74,.12);">'
+        . '<tr><td style="background:linear-gradient(135deg,#0a2158,#1347a8);padding:26px 32px;">'
+        . '<div style="font-size:20px;font-weight:800;color:#ffffff;">CRICT</div>'
+        . '<div style="font-size:12px;color:#c7d7f5;margin-top:4px;">Espace Numérique de Travail — Mes demandes</div>'
+        . '</td></tr>'
+        . '<tr><td style="height:24px;"></td></tr>'
+        . $badge_html
+        . '<tr><td style="padding:0 32px;">'
+        . '<div style="font-size:17px;font-weight:800;color:#0a2158;margin-bottom:14px;">' . htmlspecialchars($titre) . '</div>'
+        . '<div style="font-size:14px;color:#16213e;line-height:1.65;">' . $contenu . '</div>'
+        . '</td></tr>'
+        . '<tr><td style="height:26px;"></td></tr>'
+        . '<tr><td style="background:#f6f8fc;border-top:1px solid #e4e9f2;padding:18px 32px;">'
+        . '<div style="font-size:12px;color:#64748b;line-height:1.6;">'
+        . 'CRICT — Conakry, République de Guinée · www.crict.edu.gn<br>'
+        . '<span style="color:#94a3b8;">Message automatique — merci de ne pas y répondre.</span>'
+        . '</div></td></tr>'
+        . '</table></td></tr></table></body></html>';
+}
+
+function demandes_email_bloc_details(array $lignes): string {
+    $rows = '';
+    foreach ($lignes as $label => $valeur) {
+        if ($valeur === '' || $valeur === null) continue;
+        $rows .= '<tr>'
+            . '<td style="padding:9px 14px;font-size:12px;font-weight:700;color:#64748b;'
+            . 'text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;vertical-align:top;">'
+            . htmlspecialchars((string)$label) . '</td>'
+            . '<td style="padding:9px 14px;font-size:14px;font-weight:600;color:#0a2158;">'
+            . htmlspecialchars((string)$valeur) . '</td></tr>';
+    }
+    return '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        . 'style="background:#eef4ff;border:1px solid #dbe7ff;border-radius:12px;margin:16px 0;">'
+        . $rows . '</table>';
+}
+
+/** Contacts utilisateurs (id, email, nom) à partir d'IDs utilisateurs. */
+function demandes_contacts_utilisateurs(array $uids): array {
+    $uids = array_values(array_unique(array_filter(array_map('intval', $uids))));
+    if (!$uids) return [];
+    $in = implode(',', $uids);
+    $rows = get_db()->query("
+        SELECT id, email, CONCAT_WS(' ', prenoms, nom) AS nom
+        FROM utilisateurs WHERE id IN ($in) AND statut = 'ACTIF'
+    ")->fetchAll() ?: [];
+    $out = [];
+    foreach ($rows as $r) {
+        $out[(int)$r['id']] = [
+            'id'    => (int)$r['id'],
+            'email' => trim((string)($r['email'] ?? '')),
+            'nom'   => trim((string)($r['nom'] ?? '')),
+        ];
+    }
+    return $out;
+}
+
+function demandes_uid_depuis_personnel(int $personnel_id): int {
+    if ($personnel_id <= 0) return 0;
+    $st = get_db()->prepare("SELECT utilisateur_id FROM personnel WHERE id = ?");
+    $st->execute([$personnel_id]);
+    return (int)$st->fetchColumn();
+}
+
+/** Comptes DG (+ Super Admin pour les tests / secours). */
+function demandes_uids_dg(): array {
+    $ids = [];
+    try {
+        $sql = "
+            SELECT DISTINCT u.id FROM utilisateurs u
+            JOIN groupes_utilisateurs g ON g.id = u.groupe_id
+            WHERE u.statut = 'ACTIF' AND g.code IN ('SUPER_ADMIN','DG')";
+        foreach (get_db()->query($sql) as $row) {
+            $ids[] = (int)$row['id'];
+        }
+    } catch (Throwable $e) {
+        error_log('[CRICT demandes] uids DG : ' . $e->getMessage());
+    }
+    return array_values(array_unique(array_filter($ids)));
+}
+
+/** Uniquement le demandeur principal (pas les agents mission / RH). */
+function demandes_uids_demandeur(array $d): array {
+    $uid = demandes_uid_depuis_personnel((int)($d['personnel_id'] ?? 0));
+    return $uid > 0 ? [$uid] : [];
+}
+
+function demandes_resume_ligne(array $d): string {
+    $lib = demandes_type_libelle($d);
+    $ref = trim((string)($d['reference'] ?? ''));
+    $dates = '';
+    if (!empty($d['date_debut']) && !empty($d['date_fin'])) {
+        $dates = format_date($d['date_debut']) . ' → ' . format_date($d['date_fin']);
+    }
+    $parts = array_filter([$lib, $ref !== '' ? $ref : null, $dates !== '' ? $dates : null]);
+    return implode(' · ', $parts);
+}
+
+function demandes_notifier_et_mailer(array $uids, string $titre, string $message, ?int $demande_id, string $sujet_mail, string $titre_mail, string $contenu_mail, ?array $badge = null, bool $exclure_acteur = true): void {
+    $acteur = (int)user_id();
+    $uids = array_values(array_unique(array_filter(array_map('intval', $uids), function ($id) use ($acteur, $exclure_acteur) {
+        if ($id <= 0) return false;
+        if ($exclure_acteur && $id === $acteur) return false;
+        return true;
+    })));
+    if (!$uids) return;
+
+    foreach ($uids as $uid) {
+        demandes_notif_creer($uid, $titre, $message, $demande_id);
+    }
+
+    demandes_mail_charger();
+    $html = demandes_email_gabarit($titre_mail, $contenu_mail, $badge);
+    $contacts = demandes_contacts_utilisateurs($uids);
+    foreach ($contacts as $c) {
+        if ($c['email'] === '') continue;
+        try {
+            @envoyer_email($c['email'], $c['nom'] ?: $c['email'], $sujet_mail, $html);
+        } catch (Throwable $e) {
+            error_log('[CRICT demandes] mail : ' . $e->getMessage());
+        }
+    }
+}
+
+/**
+ * Notifications système + e-mails : uniquement Demandeur ↔ DG.
+ * $event : creee | visa_resp | approuvee | refusee | annulee
+ */
+function demandes_notifier_evenement(int $demande_id, string $event): void {
+    $d = demandes_par_id($demande_id);
+    if (!$d) return;
+
+    $lien_dg  = rtrim(APP_URL, '/') . '/modules/demandes/demandes.php?tab=valider';
+    $lien_dem = rtrim(APP_URL, '/') . '/modules/demandes/demandes.php?tab=mes';
+    $resume = demandes_resume_ligne($d);
+    $employe = '';
+    try {
+        $st = get_db()->prepare("
+            SELECT CONCAT_WS(' ', u.prenoms, u.nom) FROM personnel p
+            JOIN utilisateurs u ON u.id = p.utilisateur_id WHERE p.id = ?
+        ");
+        $st->execute([(int)$d['personnel_id']]);
+        $employe = trim((string)$st->fetchColumn());
+    } catch (Throwable $e) {}
+
+    $details = demandes_email_bloc_details([
+        'Type'       => demandes_type_libelle($d),
+        'Référence'  => $d['reference'] ?? '',
+        'Demandeur'  => $employe,
+        'Période'    => (!empty($d['date_debut']) ? format_date($d['date_debut']) . ' → ' . format_date($d['date_fin']) : ''),
+        'Destination'=> ($d['categorie'] ?? '') === 'MISSION' ? ($d['destination'] ?? '') : '',
+        'Statut'     => demandes_libelle_statut($d['statut'] ?? ''),
+        'Commentaire'=> $d['commentaire_validation'] ?? '',
+    ]);
+    $btn = function (string $lien) {
+        return '<p style="margin:14px 0 0;"><a href="' . htmlspecialchars($lien) . '" '
+            . 'style="display:inline-block;background:#1347a8;color:#ffffff;text-decoration:none;'
+            . 'font-weight:700;font-size:14px;padding:11px 22px;border-radius:10px;">Ouvrir Mes demandes</a></p>';
+    };
+
+    $uids_dg  = demandes_uids_dg();
+    $uids_dem = demandes_uids_demandeur($d);
+
+    switch ($event) {
+        case 'creee':
+            // Demandeur → DG
+            demandes_notifier_et_mailer(
+                $uids_dg,
+                'Nouvelle demande — ' . demandes_type_libelle($d),
+                ($employe !== '' ? $employe . ' — ' : '') . $resume,
+                $demande_id,
+                '[CRICT] Nouvelle demande — ' . ($d['reference'] ?? ''),
+                'Nouvelle demande à traiter',
+                '<p style="margin:0 0 6px;">Une nouvelle demande vient d\'être soumise et attend votre attention.</p>' . $details . $btn($lien_dg),
+                ['label' => 'À traiter', 'bg' => '#fef3c7', 'color' => '#92400e']
+            );
+            // Accusé au demandeur
+            demandes_notifier_et_mailer(
+                $uids_dem,
+                'Demande enregistrée — ' . demandes_type_libelle($d),
+                'Votre demande a été transmise au DG. ' . $resume,
+                $demande_id,
+                '[CRICT] Accusé de réception — ' . ($d['reference'] ?? 'demande'),
+                'Votre demande a bien été enregistrée',
+                '<p style="margin:0 0 6px;">Votre demande a été transmise au Directeur Général. Vous serez notifié(e) dès qu\'elle sera traitée.</p>' . $details . $btn($lien_dem),
+                ['label' => 'Enregistrée', 'bg' => '#dbeafe', 'color' => '#1e40af'],
+                false
+            );
+            break;
+
+        case 'visa_resp':
+            // La demande arrive chez le DG
+            demandes_notifier_et_mailer(
+                $uids_dg,
+                'Mission à valider — ' . ($d['reference'] ?? ''),
+                ($employe !== '' ? $employe . ' — ' : '') . $resume,
+                $demande_id,
+                '[CRICT] Validation DG requise — ' . ($d['reference'] ?? 'mission'),
+                'Ordre de mission en attente de votre validation',
+                '<p style="margin:0 0 6px;">Un ordre de mission nécessite votre validation.</p>' . $details . $btn($lien_dg),
+                ['label' => 'Validation DG', 'bg' => '#dbeafe', 'color' => '#1e40af']
+            );
+            demandes_notifier_et_mailer(
+                $uids_dem,
+                'Demande en attente du DG',
+                'Votre demande est en attente de validation par le DG. ' . $resume,
+                $demande_id,
+                '[CRICT] En attente du DG — ' . ($d['reference'] ?? ''),
+                'Votre demande est chez le DG',
+                '<p style="margin:0 0 6px;">Votre demande est désormais <strong>en attente de validation par le Directeur Général</strong>.</p>' . $details . $btn($lien_dem),
+                ['label' => 'Attente DG', 'bg' => '#dbeafe', 'color' => '#1e40af']
+            );
+            break;
+
+        case 'approuvee':
+            // DG → Demandeur
+            demandes_notifier_et_mailer(
+                $uids_dem,
+                'Demande approuvée — ' . demandes_type_libelle($d),
+                'Votre demande a été approuvée par le DG. ' . $resume,
+                $demande_id,
+                '[CRICT] Demande approuvée — ' . ($d['reference'] ?? ''),
+                'Votre demande a été approuvée',
+                '<p style="margin:0 0 6px;">Bonne nouvelle : votre demande a été <strong>approuvée</strong> par le Directeur Général.</p>' . $details . $btn($lien_dem),
+                ['label' => 'Approuvée', 'bg' => '#dcfce7', 'color' => '#166534']
+            );
+            break;
+
+        case 'refusee':
+            // DG → Demandeur
+            demandes_notifier_et_mailer(
+                $uids_dem,
+                'Demande refusée — ' . demandes_type_libelle($d),
+                'Votre demande a été refusée. ' . $resume,
+                $demande_id,
+                '[CRICT] Demande refusée — ' . ($d['reference'] ?? ''),
+                'Votre demande a été refusée',
+                '<p style="margin:0 0 6px;">Votre demande a été <strong>refusée</strong>.</p>' . $details . $btn($lien_dem),
+                ['label' => 'Refusée', 'bg' => '#fee2e2', 'color' => '#991b1b']
+            );
+            break;
+
+        case 'annulee':
+            // Demandeur → DG
+            demandes_notifier_et_mailer(
+                $uids_dg,
+                'Demande annulée — ' . demandes_type_libelle($d),
+                ($employe !== '' ? $employe . ' — ' : '') . 'Demande annulée. ' . $resume,
+                $demande_id,
+                '[CRICT] Demande annulée — ' . ($d['reference'] ?? ''),
+                'Demande annulée',
+                '<p style="margin:0 0 6px;">Une demande a été <strong>annulée</strong> par le demandeur.</p>' . $details . $btn($lien_dg),
+                ['label' => 'Annulée', 'bg' => '#f3f4f6', 'color' => '#6b7280']
+            );
+            break;
+    }
 }

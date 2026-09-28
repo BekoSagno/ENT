@@ -96,11 +96,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $a_valider = demandes_a_valider($mon_pid, $peut_rh, $est_dg);
 $peut_voir_validation = $peut_rh || $est_dg || count($a_valider) > 0;
+$traitees  = $peut_voir_validation ? demandes_lister_traitees_par($uid) : [];
+
+// Option A : clic module avec alerte → pointer vers le message (pas d'onglet Notifications)
+if (!empty($_GET['voir_alerte']) && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    $cible = demandes_alerte_cible($uid, $mon_pid, $peut_rh, $est_dg);
+    if (!empty($cible['demande_id'])) {
+        demandes_notif_marquer_demande_lue($uid, (int)$cible['demande_id']);
+    } elseif (!empty($cible['notif'])) {
+        demandes_notif_tout_lu($uid);
+    }
+    if (($cible['url'] ?? '') !== '' && ($cible['url'] !== '/modules/demandes/demandes.php' || !empty($cible['demande_id']) || !empty($cible['notif']))) {
+        redirect($cible['url']);
+    }
+}
 
 $tab = $_GET['tab'] ?? 'mes';
 $cat = $_GET['cat'] ?? 'toutes';
+$focus_id = (int)($_GET['focus'] ?? 0);
+$focus_demande = $focus_id > 0 ? demandes_par_id($focus_id) : null;
+if ($focus_id > 0) {
+    demandes_notif_marquer_demande_lue($uid, $focus_id);
+}
+
 if ($tab === 'valider' && !$peut_voir_validation) $tab = 'mes';
+if ($tab === 'historique_val' && !$peut_voir_validation) $tab = 'mes';
 if (!in_array($cat, ['toutes', 'conge', 'absence', 'mission', 'historique'], true)) $cat = 'toutes';
+if (!in_array($tab, ['mes', 'valider', 'historique_val'], true)) $tab = 'mes';
+
+// Si focus sur une demande traitée et onglet mes sans historique → forcer historique
+if ($focus_demande && $tab === 'mes' && $cat !== 'historique'
+    && in_array($focus_demande['statut'] ?? '', ['APPROUVE', 'REFUSE', 'ANNULE'], true)
+) {
+    $cat = 'historique';
+}
+
+// Focus demandé mais plus dans « À valider » → basculer vers l'historique
+if ($focus_id > 0 && $tab === 'valider' && $focus_demande) {
+    $encore = false;
+    foreach ($a_valider as $av) {
+        if ((int)$av['id'] === $focus_id) { $encore = true; break; }
+    }
+    if (!$encore) {
+        if ($peut_voir_validation && in_array($focus_demande['statut'] ?? '', ['APPROUVE', 'REFUSE'], true)) {
+            $tab = 'historique_val';
+        } else {
+            $tab = 'mes';
+            $cat = 'historique';
+        }
+    }
+}
 
 $solde_repos = demandes_solde_repos($mon_pid, $annee);
 $cat_filtre  = in_array($cat, ['conge', 'absence', 'mission'], true) ? strtoupper($cat) : null;
@@ -149,6 +194,29 @@ demandes_ui_styles();
   <?php endif; ?>
 </div>
 
+<?php if ($focus_demande):
+    $fb = $stc[$focus_demande['statut']] ?? $stc['EN_ATTENTE'];
+    $is_refus = ($focus_demande['statut'] ?? '') === 'REFUSE';
+    $is_ok    = ($focus_demande['statut'] ?? '') === 'APPROUVE';
+?>
+<div class="dm-alerte-focus <?= $is_refus ? 'refus' : ($is_ok ? 'ok' : 'info') ?>">
+  <div class="dm-alerte-focus-ic">
+    <i class="fa-solid <?= $is_refus ? 'fa-circle-xmark' : ($is_ok ? 'fa-circle-check' : 'fa-bell') ?>"></i>
+  </div>
+  <div class="dm-alerte-focus-body">
+    <strong><?= e(demandes_libelle_statut($focus_demande['statut'] ?? '')) ?>
+      <?php if (!empty($focus_demande['reference'])): ?> — <?= e($focus_demande['reference']) ?><?php endif; ?>
+    </strong>
+    <?php if (!empty($focus_demande['commentaire_validation'])): ?>
+    <div><?= e($focus_demande['commentaire_validation']) ?></div>
+    <?php else: ?>
+    <div><?= e(demandes_type_libelle($focus_demande)) ?> · <?= e(format_date($focus_demande['date_debut'])) ?> → <?= e(format_date($focus_demande['date_fin'])) ?></div>
+    <?php endif; ?>
+  </div>
+  <span class="dm-statut" style="background:<?= $fb[1] ?>;color:<?= $fb[2] ?>;"><?= e($fb[0] ?? demandes_libelle_statut($focus_demande['statut'] ?? '')) ?></span>
+</div>
+<?php endif; ?>
+
 <!-- ===== MES DEMANDES ===== -->
 <div class="dm-pane <?= $tab === 'mes' ? 'active' : '' ?>" id="pane-mes">
 
@@ -173,9 +241,15 @@ demandes_ui_styles();
       </a>
     </div>
     <div class="dm-link-hist-wrap">
+      <?php if ($peut_voir_validation): ?>
+      <a href="?tab=historique_val" class="dm-link-hist">
+        <i class="fa-solid fa-clock-rotate-left"></i> Voir l'historique des validations
+      </a>
+      <?php else: ?>
       <a href="?tab=mes&cat=historique" class="dm-link-hist">
         <i class="fa-solid fa-clock-rotate-left"></i> Voir tout l'historique
       </a>
+      <?php endif; ?>
     </div>
   </div>
 
@@ -343,7 +417,7 @@ demandes_ui_styles();
             $b = $stc[$d['statut']] ?? $stc['EN_ATTENTE'];
             $icon = $cat_icons[$d['categorie']] ?? 'fa-file';
         ?>
-        <div class="dm-card">
+        <div class="dm-card<?= $focus_id === (int)$d['id'] ? ' dm-card-focus' : '' ?>" id="demande-<?= (int)$d['id'] ?>">
           <div class="dm-card-head">
             <div>
               <div class="dm-card-title">
@@ -404,7 +478,7 @@ demandes_ui_styles();
     <?php foreach ($a_valider as $d):
         $icon = $cat_icons[$d['categorie']] ?? 'fa-file';
     ?>
-    <div class="dm-card">
+    <div class="dm-card<?= $focus_id === (int)$d['id'] ? ' dm-card-focus' : '' ?>" id="demande-<?= (int)$d['id'] ?>">
       <div class="dm-card-head">
         <div>
           <div class="dm-card-title">
@@ -441,22 +515,82 @@ demandes_ui_styles();
   </div></div>
   </div>
 </div>
+
+<!-- ===== HISTORIQUE VALIDATIONS (DG / RH / responsables) ===== -->
+<div class="dm-pane <?= $tab === 'historique_val' ? 'active' : '' ?>" id="pane-historique_val">
+  <div class="dm-wrap">
+    <div class="card">
+      <div class="card-header"><h2>Demandes que vous avez traitées</h2></div>
+      <div class="card-body">
+        <?php if (empty($traitees)): ?>
+          <p class="dm-empty">Aucune demande validée ou refusée pour le moment.</p>
+        <?php endif; ?>
+        <?php foreach ($traitees as $d):
+            $b = $stc[$d['statut']] ?? $stc['EN_ATTENTE'];
+            $icon = $cat_icons[$d['categorie']] ?? 'fa-file';
+            $quand = $d['valide_dg_le'] ?? $d['valide_resp_le'] ?? $d['cree_le'] ?? null;
+        ?>
+        <div class="dm-card<?= $focus_id === (int)$d['id'] ? ' dm-card-focus' : '' ?>" id="demande-<?= (int)$d['id'] ?>">
+          <div class="dm-card-head">
+            <div>
+              <div class="dm-card-title">
+                <i class="fa-solid <?= $icon ?>"></i>
+                <?= e($d['employe_nom'] ?? '') ?> — <?= e($d['type_libelle']) ?>
+                <?php if (!empty($d['reference'])): ?><span class="dm-ref"><?= e($d['reference']) ?></span><?php endif; ?>
+              </div>
+              <div class="dm-card-meta"><?= e(format_date($d['date_debut'])) ?> → <?= e(format_date($d['date_fin'])) ?> · <?= demandes_fmt_jours($d['nombre_jours']) ?> j.</div>
+              <?php if ($d['categorie'] === 'MISSION' && !empty($d['destination'])): ?>
+              <div class="dm-card-meta"><i class="fa-solid fa-location-dot"></i> <?= e($d['destination']) ?></div>
+              <?php if (!empty($d['ordre_mission_numero'])): ?>
+              <div class="dm-card-meta"><strong>Réf. officielle :</strong> <?= e($d['ordre_mission_numero']) ?></div>
+              <?php endif; ?>
+              <?php endif; ?>
+              <?php if ($quand): ?>
+              <div class="dm-card-meta"><i class="fa-regular fa-clock"></i> Traité le <?= e(format_datetime($quand)) ?></div>
+              <?php endif; ?>
+            </div>
+            <span class="dm-statut" style="background:<?= $b[1] ?>;color:<?= $b[2] ?>;"><?= demandes_libelle_statut($d['statut']) ?></span>
+          </div>
+          <?php if (!empty($d['commentaire_validation'])): ?>
+          <div class="dm-comment"><i class="fa-solid fa-comment"></i> <?= e($d['commentaire_validation']) ?></div>
+          <?php endif; ?>
+          <div class="dm-card-actions">
+            <a href="voir.php?id=<?= (int)$d['id'] ?>" class="btn btn-secondary btn-sm">
+              <i class="fa-solid fa-eye"></i> Voir détails
+            </a>
+            <?php if ($d['categorie'] === 'MISSION' && $d['statut'] === 'APPROUVE'): ?>
+            <a href="mission_print.php?id=<?= (int)$d['id'] ?>" class="btn btn-primary btn-sm" target="_blank">
+              <i class="fa-solid fa-print"></i> Ordre de mission (PDF)
+            </a>
+            <?php endif; ?>
+          </div>
+        </div>
+        <?php endforeach; ?>
+      </div>
+    </div>
+  </div>
+</div>
 <?php endif; ?>
 
 <?php
 $extra_scripts = '<script src="https://cdnjs.cloudflare.com/ajax/libs/tinymce/6.8.3/tinymce.min.js" referrerpolicy="origin"></script>
 <script>
-document.querySelectorAll(".dm-tab").forEach(function(b){
+document.querySelectorAll(".dm-tab[data-tab]").forEach(function(b){
   b.addEventListener("click",function(e){
     e.preventDefault();
     var t=this.dataset.tab;
     document.querySelectorAll(".dm-tab").forEach(function(x){x.classList.remove("active");});
     document.querySelectorAll(".dm-pane").forEach(function(x){x.classList.remove("active");});
     this.classList.add("active");
-    document.getElementById("pane-"+t).classList.add("active");
+    var pane=document.getElementById("pane-"+t);
+    if(pane) pane.classList.add("active");
     history.replaceState(null,"","?tab="+t);
   });
 });
+(function(){
+  var el=document.querySelector(".dm-card-focus");
+  if(el){ setTimeout(function(){ el.scrollIntoView({behavior:"smooth",block:"center"}); }, 120); }
+})();
 function dmAutreToggle(selId,wrapId,inpId,formId,msg){
   var sel=document.getElementById(selId);
   var wrap=document.getElementById(wrapId);

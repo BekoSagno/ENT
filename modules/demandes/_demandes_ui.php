@@ -56,6 +56,15 @@ if (!function_exists('demandes_ui_styles')) {
 .dm-val-form .form-control{flex:1;min-width:160px;margin:0;}
 .dm-action-tag{display:inline-block;margin-top:6px;font-size:.72rem;font-weight:700;color:#1e40af;background:#dbeafe;padding:3px 10px;border-radius:6px;}
 
+.dm-card-focus{border-color:#2563eb !important;box-shadow:0 0 0 3px rgba(37,99,235,.25);background:#f8fbff;}
+.dm-alerte-focus{display:flex;align-items:flex-start;gap:12px;max-width:920px;margin:0 auto 16px;padding:14px 16px;border-radius:12px;border:1px solid #bfdbfe;background:#eff6ff;}
+.dm-alerte-focus.refus{border-color:#fecaca;background:#fff5f5;color:#991b1b;}
+.dm-alerte-focus.ok{border-color:#bbf7d0;background:#f0fdf4;color:#166534;}
+.dm-alerte-focus.info{border-color:#bfdbfe;background:#eff6ff;color:#1e40af;}
+.dm-alerte-focus-ic{font-size:1.2rem;margin-top:2px;}
+.dm-alerte-focus-body{flex:1;min-width:0;font-size:.88rem;line-height:1.45;}
+.dm-alerte-focus-body strong{display:block;margin-bottom:4px;font-size:.92rem;}
+
 .dm-grid1{grid-template-columns:1fr !important;}
 @media(max-width:880px){.dm-grid2{grid-template-columns:1fr !important;}}
 

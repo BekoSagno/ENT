@@ -616,6 +616,16 @@ function auto_anaq_point_pieces_uploader(int $critere_id): array {
     return $erreurs;
 }
 
+function auto_anaq_critere_question_sauver(int $critere_id, string $question): bool {
+    try {
+        $st = get_db()->prepare('UPDATE identite_auto_criteres SET question = ? WHERE id = ?');
+        return $st->execute([trim($question), $critere_id]);
+    } catch (Throwable $e) {
+        error_log('auto_anaq_critere_question_sauver: ' . $e->getMessage());
+        return false;
+    }
+}
+
 function auto_anaq_point_sauver(int $critere_id, bool $with_uploads = false, bool $log = true): array {
     if ($critere_id <= 0) {
         return ['ok' => false, 'message' => 'Point invalide.'];
@@ -623,6 +633,13 @@ function auto_anaq_point_sauver(int $critere_id, bool $with_uploads = false, boo
     $existant = auto_anaq_critere_par_id($critere_id);
     if (!$existant) {
         return ['ok' => false, 'message' => 'Point introuvable.'];
+    }
+
+    // Mise à jour de la question si le champ est soumis (mode édition)
+    if (array_key_exists('question', $_POST)) {
+        if (!auto_anaq_critere_question_sauver($critere_id, (string)$_POST['question'])) {
+            return ['ok' => false, 'message' => 'Erreur lors de l\'enregistrement de la question.'];
+        }
     }
 
     $score = auto_anaq_critere_type_nombre($existant) ? null : auto_anaq_point_score_from_post($existant);

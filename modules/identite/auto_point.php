@@ -67,10 +67,12 @@ auto_anaq_ui_styles();
   <?php endif; ?>
 </div>
 
+<?php if (!$mode_edit): ?>
 <div class="aa-zone aa-zone-read">
   <div class="aa-zone-lbl"><i class="fa-solid fa-circle-question"></i> La question posée</div>
   <div class="aa-zone-body"><?= nl2br(e($critere['question'])) ?></div>
 </div>
+<?php endif; ?>
 
 <div class="aa-zone aa-zone-read">
   <div class="aa-zone-lbl">
@@ -99,6 +101,11 @@ auto_anaq_ui_styles();
   <input type="hidden" name="critere_id" value="<?= $critere_id ?>">
   <input type="hidden" name="champ_id" value="<?= (int)$critere['champ_id'] ?>">
   <input type="hidden" name="en_mode_edit" value="1">
+
+  <div class="aa-zone">
+    <div class="aa-zone-lbl"><i class="fa-solid fa-circle-question"></i> La question posée</div>
+    <textarea name="question" class="form-control aa-autosave-field" rows="4" placeholder="Saisissez la question d'évaluation pour ce point…"><?= e($critere['question'] ?? '') ?></textarea>
+  </div>
 
   <div class="aa-zone">
     <div class="aa-zone-lbl"><i class="fa-solid fa-pen"></i> Réponses</div>
