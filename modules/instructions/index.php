@@ -12,10 +12,11 @@ exiger_permission('INSTRUCTIONS', 'VOIR');
 $peut_emettre = _instr_peut_emettre();
 
 $f = [
-    'statut'   => clean($_GET['statut']   ?? ''),
-    'type'     => clean($_GET['type']     ?? ''),
-    'priorite' => clean($_GET['priorite'] ?? ''),
-    'q'        => clean($_GET['q']        ?? ''),
+    'statut'    => clean($_GET['statut']    ?? ''),
+    'type'      => clean($_GET['type']      ?? ''),
+    'priorite'  => clean($_GET['priorite']  ?? ''),
+    'q'         => clean($_GET['q']         ?? ''),
+    'a_valider' => clean($_GET['a_valider'] ?? ''),   // '1' = uniquement celles en attente de validation
 ];
 
 $par_page = 12;
@@ -26,6 +27,7 @@ $instr    = $result['data'];
 $total    = $result['total'];
 $pager    = paginer($total, $par_page, $page);
 $cpt      = instruction_compteurs();
+$nb_a_valider = $peut_emettre ? instruction_nb_a_valider() : 0;   // tâches soumises en attente du DG
 
 $statut_cfg = [
     'EN_COURS' => ['label'=>'En cours','bg'=>'#dbeafe','color'=>'#1e40af','bord'=>'#3b82f6','icon'=>'fa-spinner'],
@@ -42,8 +44,10 @@ include __DIR__ . '/../../views/layout/header.php';
 <style>
 .stats-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:24px;}
 .sc{background:var(--surface);border:1.5px solid var(--border);border-radius:12px;padding:14px 18px;}
+.sc.alerte{border-color:#c4b5fd;background:#faf5ff;}
 .sc-icon{font-size:.85rem;margin-bottom:6px;} .sc-val{font-size:1.65rem;font-weight:800;line-height:1;}
 .sc-lbl{font-size:.72rem;color:var(--text-muted);margin-top:3px;}
+.sc-link{text-decoration:none;display:block;}
 .filtres-bar{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;}
 .fg{display:flex;flex-direction:column;gap:4px;} .fg-label{font-size:.68rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.07em;}
 .ins-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:18px;margin-bottom:28px;}
@@ -76,21 +80,38 @@ include __DIR__ . '/../../views/layout/header.php';
   <?php endif; ?>
 </div>
 
+<?php if ($peut_emettre && $nb_a_valider > 0): ?>
+<div class="banner" style="display:flex;align-items:center;gap:10px;background:#faf5ff;border:1.5px solid #c4b5fd;border-radius:12px;padding:12px 16px;margin-bottom:20px;color:#5b21b6;font-size:.86rem;font-weight:600;">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <span><?= $nb_a_valider ?> tâche<?= $nb_a_valider>1?'s':'' ?> en attente de votre validation.</span>
+  <a href="?a_valider=1" class="btn btn-sm" style="margin-left:auto;background:#7c3aed;color:#fff;"><i class="fa-solid fa-filter"></i> Voir</a>
+</div>
+<?php endif; ?>
+
 <div class="stats-row">
 <?php
 $stats_def = [
-  ['val'=>(int)$cpt['total'],     'lbl'=>'Total',     'icon'=>'fa-bullhorn',     'color'=>'var(--blue-600)'],
-  ['val'=>(int)$cpt['en_cours'],  'lbl'=>'En cours',  'icon'=>'fa-spinner',      'color'=>'#3b82f6'],
-  ['val'=>(int)$cpt['terminees'], 'lbl'=>'Terminées', 'icon'=>'fa-circle-check', 'color'=>'#22c55e'],
-  ['val'=>(int)($cpt['uniques']??0),   'lbl'=>'Tâche unique',   'icon'=>'fa-user',  'color'=>'#8b5cf6'],
-  ['val'=>(int)($cpt['multiples']??0), 'lbl'=>'Tâches multiples','icon'=>'fa-users','color'=>'#0ea5e9'],
+  ['val'=>(int)$cpt['total'],     'lbl'=>'Total',     'icon'=>'fa-bullhorn',     'color'=>'var(--blue-600)', 'href'=>'index.php'],
+  ['val'=>(int)$cpt['en_cours'],  'lbl'=>'En cours',  'icon'=>'fa-spinner',      'color'=>'#3b82f6',         'href'=>'?statut=EN_COURS'],
+  ['val'=>(int)$cpt['terminees'], 'lbl'=>'Terminées', 'icon'=>'fa-circle-check', 'color'=>'#22c55e',         'href'=>'?statut=TERMINEE'],
+  ['val'=>(int)($cpt['uniques']??0),   'lbl'=>'Tâche unique',    'icon'=>'fa-user',  'color'=>'#8b5cf6', 'href'=>'?type=UNIQUE'],
+  ['val'=>(int)($cpt['multiples']??0), 'lbl'=>'Tâches multiples','icon'=>'fa-users', 'color'=>'#0ea5e9', 'href'=>'?type=MULTIPLE'],
 ];
+// Carte "À valider" : visible uniquement pour le DG / émetteur
+if ($peut_emettre) {
+  array_splice($stats_def, 1, 0, [[
+    'val'=>$nb_a_valider, 'lbl'=>'À valider', 'icon'=>'fa-magnifying-glass',
+    'color'=>'#7c3aed', 'href'=>'?a_valider=1', 'alerte'=>true,
+  ]]);
+}
 foreach ($stats_def as $s): ?>
-<div class="sc">
-  <div class="sc-icon" style="color:<?= $s['color'] ?>;"><i class="fa-solid <?= $s['icon'] ?>"></i></div>
-  <div class="sc-val" style="color:<?= $s['color'] ?>;"><?= $s['val'] ?></div>
-  <div class="sc-lbl"><?= $s['lbl'] ?></div>
-</div>
+<a class="sc-link" href="<?= $s['href'] ?>">
+  <div class="sc <?= !empty($s['alerte']) ? 'alerte' : '' ?>">
+    <div class="sc-icon" style="color:<?= $s['color'] ?>;"><i class="fa-solid <?= $s['icon'] ?>"></i></div>
+    <div class="sc-val" style="color:<?= $s['color'] ?>;"><?= $s['val'] ?></div>
+    <div class="sc-lbl"><?= $s['lbl'] ?></div>
+  </div>
+</a>
 <?php endforeach; ?>
 </div>
 
@@ -115,6 +136,13 @@ foreach ($stats_def as $s): ?>
       <?php foreach ($prio_cfg as $k=>$_): ?><option value="<?= $k ?>" <?= $f['priorite']===$k?'selected':'' ?>><?= $k ?></option><?php endforeach; ?>
     </select>
   </div>
+  <?php if ($peut_emettre): ?>
+  <div class="fg"><span class="fg-label">Validation</span>
+    <select id="favalider" class="form-control"><option value="">Toutes</option>
+      <option value="1" <?= $f['a_valider']==='1'?'selected':'' ?>>À valider</option>
+    </select>
+  </div>
+  <?php endif; ?>
   <div class="fg"><span class="fg-label">&nbsp;</span>
     <div style="display:flex;gap:6px;">
       <button class="btn btn-primary btn-sm" onclick="appF()"><i class="fa-solid fa-search"></i> Filtrer</button>
@@ -125,6 +153,7 @@ foreach ($stats_def as $s): ?>
 
 <div style="font-size:.8rem;color:var(--text-muted);margin-bottom:14px;">
   <strong style="color:var(--text);"><?= $total ?></strong> instruction<?= $total>1?'s':'' ?>
+  <?= $f['a_valider']==='1' ? ' · <span style="color:#7c3aed;font-weight:700;">en attente de validation</span>' : '' ?>
 </div>
 
 <?php if (empty($instr)): ?>
@@ -142,6 +171,7 @@ foreach ($stats_def as $s): ?>
   $sc  = $statut_cfg[$i['statut']] ?? $statut_cfg['EN_COURS'];
   $pc  = $prio_cfg[$i['priorite']] ?? $prio_cfg['NORMALE'];
   $nbT = (int)$i['nb_taches']; $nbF = (int)$i['nb_terminees'];
+  $nbV = (int)($i['nb_a_valider'] ?? 0);
   $pct = $nbT > 0 ? (int)round($nbF / $nbT * 100) : 0;
   $pfcl = $pct < 34 ? '#f59e0b' : ($pct < 100 ? '#3b82f6' : '#22c55e');
   $ech = $i['prochaine_echeance'] ?? null;
@@ -161,6 +191,7 @@ foreach ($stats_def as $s): ?>
     <div class="ic-badges">
       <span class="badge" style="background:<?= $sc['bg'] ?>;color:<?= $sc['color'] ?>;"><i class="fa-solid <?= $sc['icon'] ?>"></i> <?= $sc['label'] ?></span>
       <span class="badge" style="background:<?= $pc[0] ?>;color:<?= $pc[1] ?>;"><?= $i['priorite'] ?></span>
+      <?php if ($peut_emettre && $nbV > 0): ?><span class="badge" style="background:#ede9fe;color:#5b21b6;"><i class="fa-solid fa-magnifying-glass"></i> <?= $nbV ?> à valider</span><?php endif; ?>
       <?php if ($retard): ?><span class="badge" style="background:#fee2e2;color:#991b1b;"><i class="fa-solid fa-triangle-exclamation"></i> En retard</span><?php endif; ?>
     </div>
     <div class="ic-meta">
@@ -171,7 +202,7 @@ foreach ($stats_def as $s): ?>
     <?php if ($nbT > 0): ?>
     <div class="prog-track"><div class="prog-fill" style="width:<?= $pct ?>%;background:<?= $pfcl ?>;"></div></div>
     <div style="display:flex;justify-content:space-between;font-size:.71rem;color:var(--text-muted);">
-      <span><?= $nbF ?>/<?= $nbT ?> terminée<?= $nbF>1?'s':'' ?></span><strong style="color:var(--blue-600);"><?= $pct ?>%</strong>
+      <span><?= $nbF ?>/<?= $nbT ?> validée<?= $nbF>1?'s':'' ?></span><strong style="color:var(--blue-600);"><?= $pct ?>%</strong>
     </div>
     <?php endif; ?>
   </div>
@@ -195,9 +226,11 @@ foreach ($stats_def as $s): ?>
 <?php
 $extra_scripts = '<script>
 function appF(){
+  const fav = document.getElementById("favalider");
   const qs=new URLSearchParams({
     q:document.getElementById("fq").value, statut:document.getElementById("fstatut").value,
-    type:document.getElementById("ftype").value, priorite:document.getElementById("fpriorite").value, page:1
+    type:document.getElementById("ftype").value, priorite:document.getElementById("fpriorite").value,
+    a_valider: fav ? fav.value : "", page:1
   });
   for(const [k,v] of [...qs.entries()]) if(!v) qs.delete(k);
   location.href="?"+qs;

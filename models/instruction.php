@@ -69,6 +69,10 @@ function instruction_lister(array $f = [], int $limite = 15, int $offset = 0): a
     if (!empty($f['statut']))   { $where[] = 'i.statut=?';   $params[] = $f['statut']; }
     if (!empty($f['type']))     { $where[] = 'i.type=?';     $params[] = $f['type']; }
     if (!empty($f['priorite'])) { $where[] = 'i.priorite=?'; $params[] = $f['priorite']; }
+    if (!empty($f['a_valider'])) {
+        $where[] = "EXISTS (SELECT 1 FROM instructions_taches x
+                            WHERE x.instruction_id=i.id AND x.statut='EN_REVISION')";
+    }
     if (!empty($f['q'])) {
         $where[] = '(i.objet LIKE ? OR i.description LIKE ? OR i.code LIKE ?)';
         $q = '%' . $f['q'] . '%'; $params[] = $q; $params[] = $q; $params[] = $q;
@@ -84,6 +88,7 @@ function instruction_lister(array $f = [], int $limite = 15, int $offset = 0): a
                CONCAT(ue.prenoms,' ',ue.nom) AS emetteur_nom,
                COUNT(t.id)                                      AS nb_taches,
                SUM(t.statut='TERMINEE')                         AS nb_terminees,
+               SUM(t.statut='EN_REVISION')                      AS nb_a_valider,
                MIN(CASE WHEN t.statut NOT IN ('TERMINEE','ANNULEE') THEN t.date_echeance END) AS prochaine_echeance
         FROM instructions i
         JOIN utilisateurs ue              ON ue.id = i.emetteur_id
@@ -139,7 +144,11 @@ function instruction_taches(int $instruction_id): array {
         LEFT JOIN utilisateurs u ON u.id=o.depose_par
         WHERE o.tache_id=? ORDER BY o.cree_le
     ");
-    foreach ($taches as &$t) { $so->execute([$t['id']]); $t['outputs'] = $so->fetchAll(); }
+    foreach ($taches as &$t) {
+        $so->execute([$t['id']]);
+        $t['outputs']  = $so->fetchAll();
+        $t['echanges'] = itache_echanges((int)$t['id']);
+    }
     unset($t);
     return $taches;
 }
@@ -182,6 +191,26 @@ function instruction_nb_en_attente(int $user_id): int {
     $s = get_db()->prepare("
         SELECT COUNT(DISTINCT instruction_id) FROM instructions_taches
         WHERE assigne_a=? AND statut NOT IN ('TERMINEE','ANNULEE')
+    ");
+    $s->execute([$user_id]);
+    return (int)$s->fetchColumn();
+}
+
+/* -----------------------------------------------------------------
+   2) AJOUTER cette nouvelle fonction (par ex. juste après
+      instruction_nb_en_attente()).
+----------------------------------------------------------------- */
+// Nombre de tâches soumises en attente de validation (pour le DG / émetteur)
+function instruction_nb_a_valider(?int $user_id = null): int {
+    $user_id = $user_id ?? (int)user_id();
+    $db = get_db();
+    if (in_array(user_groupe() ?? '', ['SUPER_ADMIN','DG'], true)) {
+        return (int)$db->query("SELECT COUNT(*) FROM instructions_taches WHERE statut='EN_REVISION'")->fetchColumn();
+    }
+    $s = $db->prepare("
+        SELECT COUNT(*) FROM instructions_taches t
+        JOIN instructions i ON i.id = t.instruction_id
+        WHERE t.statut='EN_REVISION' AND i.emetteur_id=?
     ");
     $s->execute([$user_id]);
     return (int)$s->fetchColumn();
@@ -557,6 +586,114 @@ function itache_output_supprimer(int $id): array {
         $db->prepare('DELETE FROM instructions_taches_outputs WHERE id=?')->execute([$id]);
         return ['succes'=>true];
     } catch (Throwable $e) { return ['succes'=>false,'message'=>'Erreur.']; }
+}
+
+// ----------------------------------------------------------
+// MISE A JOUR SUR ECHNAGES DG
+
+
+// Charger le fil d'échanges d'une tâche
+function itache_echanges(int $tache_id): array {
+    $s = get_db()->prepare("
+        SELECT ec.*, CONCAT(u.prenoms,' ',u.nom) AS auteur_nom, g.code AS auteur_groupe
+        FROM instructions_taches_echanges ec
+        LEFT JOIN utilisateurs u         ON u.id = ec.auteur_id
+        LEFT JOIN groupes_utilisateurs g ON g.id = u.groupe_id
+        WHERE ec.tache_id=?
+        ORDER BY ec.cree_le, ec.id
+    ");
+    $s->execute([$tache_id]);
+    return $s->fetchAll();
+}
+
+// Ajouter une entrée au fil (message libre ou évènement)
+function itache_echange_ajouter(int $tache_id, int $instruction_id, int $auteur_id, string $message, string $type = 'MESSAGE'): array {
+    $message = trim($message);
+    if ($message === '' && $type === 'MESSAGE') return ['succes'=>false,'message'=>'Le message est vide.'];
+    try {
+        get_db()->prepare("INSERT INTO instructions_taches_echanges
+                             (tache_id, instruction_id, auteur_id, type, message)
+                           VALUES (?,?,?,?,?)")
+                ->execute([$tache_id, $instruction_id, $auteur_id, $type, $message !== '' ? $message : null]);
+        return ['succes'=>true];
+    } catch (Throwable $e) {
+        error_log('[CRICT itache_echange_ajouter] ' . $e->getMessage());
+        return ['succes'=>false,'message'=>'Erreur lors de l\'envoi du message.'];
+    }
+}
+
+// Le RESPONSABLE soumet sa tâche pour validation  ->  EN_REVISION
+function itache_soumettre(int $tache_id, int $user_id, string $message = ''): array {
+    $cur = itache_charger($tache_id);
+    if (!$cur)                                                return ['succes'=>false,'message'=>'Tâche introuvable.'];
+    if ((int)$cur['assigne_a'] !== $user_id)                  return ['succes'=>false,'message'=>'Seul le responsable peut soumettre cette tâche.'];
+    if ($cur['statut'] === 'BLOQUEE')                         return ['succes'=>false,'message'=>'Cette tâche est en attente d\'une autre tâche.'];
+    if (in_array($cur['statut'], ['TERMINEE','ANNULEE'], true)) return ['succes'=>false,'message'=>'Cette tâche est déjà clôturée.'];
+    if ($cur['statut'] === 'EN_REVISION')                     return ['succes'=>false,'message'=>'Déjà soumise — en attente de la validation du DG.'];
+    try {
+        get_db()->prepare("
+            UPDATE instructions_taches
+            SET statut='EN_REVISION',
+                reponse = COALESCE(NULLIF(?, ''), reponse),
+                vue_le  = COALESCE(vue_le, NOW())
+            WHERE id=?
+        ")->execute([trim($message), $tache_id]);
+
+        itache_echange_ajouter($tache_id, (int)$cur['instruction_id'], $user_id, $message, 'SOUMISSION');
+        log_activite($user_id, 'INSTRUCTIONS', 'SUIVI', "Tâche $tache_id soumise pour validation");
+        return ['succes'=>true];
+    } catch (Throwable $e) {
+        error_log('[CRICT itache_soumettre] ' . $e->getMessage());
+        return ['succes'=>false,'message'=>'Erreur lors de la soumission.'];
+    }
+}
+
+// Le DG (émetteur) VALIDE et clôture la tâche  ->  TERMINEE
+function itache_valider(int $tache_id, int $user_id, string $message = ''): array {
+    $cur = itache_charger($tache_id);
+    if (!$cur) return ['succes'=>false,'message'=>'Tâche introuvable.'];
+    if (!_instr_est_emetteur((int)$cur['instruction_id'], $user_id))
+        return ['succes'=>false,'message'=>'Seul le DG (émetteur) peut valider une tâche.'];
+    if ($cur['statut'] === 'TERMINEE') return ['succes'=>false,'message'=>'Cette tâche est déjà validée.'];
+    if ($cur['statut'] === 'ANNULEE')  return ['succes'=>false,'message'=>'Cette tâche est annulée.'];
+    try {
+        get_db()->prepare("
+            UPDATE instructions_taches
+            SET statut='TERMINEE', avancement=100, termine_le=NOW()
+            WHERE id=?
+        ")->execute([$tache_id]);
+
+        itache_echange_ajouter($tache_id, (int)$cur['instruction_id'], $user_id, $message, 'VALIDATION');
+        _instr_debloquer_dependances($tache_id);
+        _instr_recompute_statut((int)$cur['instruction_id']); // clôture l'instruction si tout est validé
+        log_activite($user_id, 'INSTRUCTIONS', 'VALIDATION', "Tâche $tache_id validée et clôturée");
+        return ['succes'=>true];
+    } catch (Throwable $e) {
+        error_log('[CRICT itache_valider] ' . $e->getMessage());
+        return ['succes'=>false,'message'=>'Erreur lors de la validation.'];
+    }
+}
+
+// Le DG (émetteur) RENVOIE la tâche pour amélioration  ->  EN_COURS (note obligatoire)
+function itache_rejeter(int $tache_id, int $user_id, string $note): array {
+    $note = trim($note);
+    if ($note === '') return ['succes'=>false,'message'=>'Précisez ce qui doit être amélioré.'];
+    $cur = itache_charger($tache_id);
+    if (!$cur) return ['succes'=>false,'message'=>'Tâche introuvable.'];
+    if (!_instr_est_emetteur((int)$cur['instruction_id'], $user_id))
+        return ['succes'=>false,'message'=>'Seul le DG (émetteur) peut renvoyer la tâche.'];
+    if ($cur['statut'] === 'TERMINEE') return ['succes'=>false,'message'=>'Cette tâche est déjà clôturée.'];
+    if ($cur['statut'] === 'ANNULEE')  return ['succes'=>false,'message'=>'Cette tâche est annulée.'];
+    try {
+        get_db()->prepare("UPDATE instructions_taches SET statut='EN_COURS' WHERE id=?")
+                ->execute([$tache_id]);
+        itache_echange_ajouter($tache_id, (int)$cur['instruction_id'], $user_id, $note, 'REJET');
+        log_activite($user_id, 'INSTRUCTIONS', 'SUIVI', "Tâche $tache_id renvoyée pour amélioration");
+        return ['succes'=>true];
+    } catch (Throwable $e) {
+        error_log('[CRICT itache_rejeter] ' . $e->getMessage());
+        return ['succes'=>false,'message'=>'Erreur lors du renvoi.'];
+    }
 }
 
 // ──────────────────────────────────────────────────────────
