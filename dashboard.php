@@ -180,24 +180,18 @@ $ligne_rapport = function(array $r, string $type) {
 ?>
 <?php if ($raccourcis): ?>
 <style>
-.raccourcis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px;}
-.raccourci{text-decoration:none;color:inherit;position:relative;}
+.raccourci{text-decoration:none;color:inherit;}
 .raccourci:hover{border-color:var(--blue-300);}
-.raccourci .rc-fleche{position:absolute;top:14px;right:14px;font-size:.72rem;color:var(--text-muted);opacity:.5;transition:opacity .15s,transform .15s;}
-.raccourci:hover .rc-fleche{opacity:1;color:var(--blue-600);transform:translateX(2px);}
-.raccourci .rc-detail{font-size:.7rem;color:var(--text-muted);margin-top:2px;}
 .stat-icon.violet{background:#ede9fe;color:#7c3aed;}
 </style>
-<div class="raccourcis-grid">
+<div class="stat-grid">
   <?php foreach ($raccourcis as $rc): ?>
-    <a href="<?= APP_URL . $rc['url'] ?>" class="stat-card raccourci" title="Ouvrir <?= e($rc['titre']) ?>">
+    <a href="<?= APP_URL . $rc['url'] ?>" class="stat-card raccourci" title="<?= e($rc['titre'] . ' : ' . $rc['detail']) ?>">
       <div class="stat-icon <?= $rc['couleur'] ?>"><i class="fa-solid <?= $rc['icone'] ?>"></i></div>
       <div>
         <div class="stat-value"><?= (int)$rc['valeur'] ?></div>
         <div class="stat-label"><?= e($rc['titre']) ?></div>
-        <div class="rc-detail"><?= e($rc['detail']) ?></div>
       </div>
-      <i class="fa-solid fa-arrow-right rc-fleche"></i>
     </a>
   <?php endforeach; ?>
 </div>
