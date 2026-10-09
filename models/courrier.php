@@ -420,20 +420,40 @@ function courrier_changer_statut(int $id, string $statut, string $commentaire = 
 // ──────────────────────────────────────────────────────────
 // DOCUMENTS (scans / pièces jointes)
 // ──────────────────────────────────────────────────────────
+function courrier_upload_erreur_texte(int $code): string {
+    return match ($code) {
+        UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => 'fichier trop volumineux pour le serveur (max ' . ini_get('upload_max_filesize') . ').',
+        UPLOAD_ERR_PARTIAL    => 'envoi interrompu, veuillez réessayer.',
+        UPLOAD_ERR_NO_FILE    => 'aucun fichier reçu.',
+        UPLOAD_ERR_NO_TMP_DIR, UPLOAD_ERR_CANT_WRITE => 'le serveur n\'a pas pu enregistrer le fichier.',
+        default               => 'erreur technique lors de l\'envoi (#' . $code . ').',
+    };
+}
+
 function courrier_doc_ajouter(int $cid, array $fichier, string $type_doc = 'SCAN'): array {
     if ($fichier['error'] !== UPLOAD_ERR_OK)
-        return ['succes'=>false,'message'=>'Erreur upload (#'.$fichier['error'].')'];
+        return ['succes'=>false,'message'=>ucfirst(courrier_upload_erreur_texte((int)$fichier['error']))];
     if ($fichier['size'] > COURRIER_MAX_SIZE)
         return ['succes'=>false,'message'=>'Fichier trop volumineux (max 15 Mo).'];
 
+    $ext   = strtolower(pathinfo($fichier['name'], PATHINFO_EXTENSION));
     $finfo = new finfo(FILEINFO_MIME_TYPE);
     $mime  = $finfo->file($fichier['tmp_name']);
+    // Les fichiers Office sont souvent détectés comme archive zip / binaire générique
+    $office = [
+        'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'doc'  => 'application/msword',
+        'xls'  => 'application/vnd.ms-excel',
+    ];
+    if (isset($office[$ext]) && in_array($mime, ['application/zip','application/x-zip-compressed','application/octet-stream','application/vnd.ms-office','application/CDFV2'], true)) {
+        $mime = $office[$ext];
+    }
     if (!in_array($mime, COURRIER_MIME_OK, true))
         return ['succes'=>false,'message'=>'Type de fichier non autorisé (PDF, Word, Excel, JPEG, PNG, WebP, TIFF).'];
 
     $type_doc = in_array($type_doc, ['SCAN','PIECE_JOINTE','REPONSE','AUTRE'], true) ? $type_doc : 'AUTRE';
 
-    $ext  = strtolower(pathinfo($fichier['name'], PATHINFO_EXTENSION));
     $dir  = COURRIER_UPLOAD_DIR . $cid . '/';
     if (!is_dir($dir)) mkdir($dir, 0750, true);
 

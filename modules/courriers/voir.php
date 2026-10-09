@@ -176,11 +176,11 @@ $val = fn($v) => ($v !== null && $v !== '') ? e((string)$v) : '<span style="colo
       <div class="ib-val"><?= !empty($cour['date_courrier']) ? format_date($cour['date_courrier']) : $val(null) ?></div>
     </div>
     <div class="info-block">
-      <div class="ib-lbl"><i class="fa-solid fa-inbox"></i> Date de réception</div>
+      <div class="ib-lbl"><i class="fa-solid fa-inbox"></i> <?= $cour['sens'] === 'SORTANT' ? 'Date d\'enregistrement' : 'Date de réception' ?></div>
       <div class="ib-val"><?= !empty($cour['date_reception']) ? format_datetime($cour['date_reception']) : $val(null) ?></div>
     </div>
     <div class="info-block">
-      <div class="ib-lbl"><i class="fa-solid fa-hourglass-half"></i> Échéance</div>
+      <div class="ib-lbl"><i class="fa-solid fa-hourglass-half"></i> <?= $cour['sens'] === 'SORTANT' ? 'Date limite d\'envoi' : 'Échéance' ?></div>
       <div class="ib-val" <?= $en_retard ? 'style="color:var(--danger);"' : '' ?>>
         <?= !empty($cour['date_echeance']) ? format_date($cour['date_echeance']) : $val(null) ?>
       </div>
@@ -229,6 +229,7 @@ $val = fn($v) => ($v !== null && $v !== '') ? e((string)$v) : '<span style="colo
   <input type="hidden" name="courrier_id" value="<?= $cid ?>">
   <span class="lbl"><i class="fa-solid fa-arrows-rotate" style="color:var(--blue-500);margin-right:6px;"></i> Changer le statut</span>
   <select name="statut" class="form-control" style="width:auto;min-width:170px;" required>
+    <option value="" selected disabled>— Choisir —</option>
     <?php foreach ($STATUTS as $k => $s): if ($k === $cour['statut']) continue; ?>
       <option value="<?= $k ?>"><?= $s['label'] ?></option>
     <?php endforeach; ?>
