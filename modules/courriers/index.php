@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/helpers.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../models/courrier.php';
+require_once __DIR__ . '/../../includes/courrier_imap.php';
 
 session_demarrer();
 exiger_connexion();
@@ -28,6 +29,7 @@ $peut_supprimer = a_permission('COURRIERS', 'SUPPRIMER');
 $est_dg         = courrier_est_dg();
 $nb_mes         = courrier_nb_participations((int)user_id());
 $nb_a_valider   = $est_dg ? courrier_nb_a_valider() : 0;
+$releve_auto    = ($voit_registre || $est_dg) && courrier_releve_auto_active();
 
 // Filtres
 $f = [
@@ -93,6 +95,7 @@ include __DIR__ . '/../../views/layout/header.php';
 .vue-switch a.on{background:var(--surface);color:var(--blue-600);box-shadow:0 1px 4px rgba(13,50,120,.1);}
 .sc.alerte{border-color:#f59e0b;background:#fffbeb;}
 .sc.actif{border-color:var(--blue-500);box-shadow:0 0 0 3px var(--blue-100);}
+.releve-info{display:none;align-items:center;gap:10px;padding:12px 16px;border-radius:8px;font-size:.85rem;margin-bottom:18px;background:#dcfce7;color:#166534;border:1px solid #bbf7d0;}
 </style>
 
 <!-- En-tête -->
@@ -114,6 +117,14 @@ include __DIR__ . '/../../views/layout/header.php';
     <a href="form.php?sens=SORTANT" class="btn btn-primary"><i class="fa-solid fa-paper-plane"></i> Courrier sortant</a>
   <?php endif; ?>
 </div>
+
+<?php if ($releve_auto): ?>
+<div class="releve-info" id="releveInfo">
+  <i class="fa-solid fa-envelope-circle-check"></i>
+  <span style="flex:1;"></span>
+  <a href="index.php" class="btn btn-success btn-sm" onclick="location.reload();return false;"><i class="fa-solid fa-rotate"></i> Actualiser la liste</a>
+</div>
+<?php endif; ?>
 
 <!-- Stats -->
 <div class="stats-row">
@@ -367,5 +378,25 @@ function confirmerSuppr(id, ref) {
   document.getElementById("formAction").submit();
 }
 </script>';
+if ($releve_auto) {
+    $extra_scripts .= '<script>
+(function () {
+  const fd = new FormData();
+  fd.append("auto", "1");
+  fd.append("csrf_token", ' . json_encode(csrf_token()) . ');
+  fetch("sync.php", { method: "POST", body: fd, credentials: "same-origin" })
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (!d || !d.crees) return;
+      const b = document.getElementById("releveInfo");
+      b.querySelector("span").textContent = d.crees > 1
+        ? d.crees + " nouveaux courriers reçus sur info@ viennent d\'être enregistrés."
+        : "Un nouveau courrier reçu sur info@ vient d\'être enregistré.";
+      b.style.display = "flex";
+    })
+    .catch(() => {});
+})();
+</script>';
+}
 include __DIR__ . '/../../views/layout/footer.php';
 ?>

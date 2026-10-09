@@ -26,11 +26,13 @@ define('IMAP_INFO_PORT',          993);                 // 993 = IMAP over SSL
 define('IMAP_INFO_ENCRYPTION',    'ssl');               // 'ssl' | 'tls'
 define('IMAP_INFO_FOLDER',        'INBOX');             // dossier à relever
 define('IMAP_INFO_VALIDATE_CERT', true);               // false si certificat auto-signé
+// Relève automatique à l'ouverture du registre (5 min mini entre deux relèves).
+// Sur une copie LOCALE qui partage la boîte info@ avec la prod, mettre :
+// define('IMAP_RELEVE_AUTO', false);
 
 // Remarques :
-//  • L'extension PHP « imap » doit être activée (php-imap).
-//      Ubuntu/Debian : sudo apt install php-imap && sudo phpenmod imap
-//      cPanel/WHM    : activer « imap » dans l'éditeur d'extensions PHP.
+//  • L'extension PHP « imap » n'est PAS nécessaire : la boîte est lue en PHP pur
+//    (includes/imap_client.php), seule l'extension openssl est utilisée.
 //  • Les RÉPONSES sortantes réutilisent MAIL_HOST / MAIL_PORT / MAIL_SECURE
 //    (mêmes serveur SMTP), mais s'authentifient avec MAIL_INFO_ADDRESS +
 //    MAIL_INFO_PASS et posent From: info@. Si MAIL_INFO_PASS est vide,
