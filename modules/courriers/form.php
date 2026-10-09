@@ -16,8 +16,8 @@ $mode = $cour ? 'modifier' : 'creer';
 // Permission : CREER pour un nouveau, MODIFIER pour l'édition
 exiger_permission('COURRIERS', $mode === 'creer' ? 'CREER' : 'MODIFIER');
 
-if ($cid && !$cour) {
-    set_flash('error', 'Courrier introuvable.');
+if ($cid && (!$cour || !courrier_peut_voir($cour))) {
+    set_flash('error', $cour ? 'Ce courrier est confidentiel : vous n\'y avez pas accès.' : 'Courrier introuvable.');
     header('Location: index.php');
     exit;
 }
@@ -200,6 +200,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && (int)($_SERVER['CO
                 } else {
                     set_flash('warn', 'L\'accusé de réception n\'a pas pu être envoyé : ' . $acc['message']);
                 }
+            }
+
+            // Le DG est prévenu de tout nouveau courrier entrant à orienter
+            if ($mode === 'creer' && $entrant) {
+                require_once __DIR__ . '/../../includes/mailer_courriers.php';
+                courrier_notifier_nouveaux_entrants([array_merge($data, ['id' => $id_cible, 'reference' => $res['reference']])]);
             }
 
             header('Location: voir.php?id=' . $id_cible);

@@ -823,8 +823,19 @@ $module_actif  = $module_actif ?? '';
     <?php endif; ?>
     
    <?php
-      $show_documents = in_array('GED', $modules_acces)
-                     || in_array('COURRIERS', $modules_acces);
+      // Courriers : registre (permission) ou agent affecté à au moins un courrier ; badge = notifications non lues
+      $cr_nav_n = 0; $cr_nav_part = 0;
+      if (is_file(APP_ROOT . '/models/courrier.php')) {
+          require_once APP_ROOT . '/models/courrier.php';
+          try {
+              $cr_nav_n    = courrier_notifs_non_lues((int)user_id());
+              $cr_nav_part = in_array('COURRIERS', $modules_acces) ? 0 : courrier_nb_participations((int)user_id());
+          } catch (Throwable $e) {
+              $cr_nav_n = 0;
+          }
+      }
+      $show_courriers = in_array('COURRIERS', $modules_acces) || $cr_nav_part > 0;
+      $show_documents = in_array('GED', $modules_acces) || $show_courriers;
     ?>
     <?php if ($show_documents): ?>
     <div class="nav-section-label">Documents</div>
@@ -837,11 +848,14 @@ $module_actif  = $module_actif ?? '';
       </a>
       <?php endif; ?>
 
-      <?php if (in_array('COURRIERS', $modules_acces)): ?>
-      <a href="<?= APP_URL ?>/modules/courriers/index.php"
+      <?php if ($show_courriers): ?>
+      <a href="<?= APP_URL ?>/modules/courriers/index.php<?= $cr_nav_n > 0 ? '?voir_alerte=1' : '' ?>"
          class="nav-item <?= $module_actif === 'COURRIERS' ? 'active' : '' ?>">
         <span class="icon"><i class="fa-solid fa-envelopes-bulk"></i></span>
-        <span class="label">Courriers</span>
+        <span class="label"><?= in_array('COURRIERS', $modules_acces) ? 'Courriers' : 'Mes courriers' ?></span>
+        <?php if ($cr_nav_n > 0): ?>
+          <span class="nav-badge"><?= (int)$cr_nav_n ?></span>
+        <?php endif; ?>
       </a>
       <?php endif; ?>
 

@@ -7,7 +7,7 @@ require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../models/courrier.php';
 
 session_demarrer();
-exiger_permission('COURRIERS', 'VOIR');
+exiger_connexion();
 
 $id = (int)($_GET['id'] ?? 0);
 if (!$id) { http_response_code(400); exit('Paramètre manquant.'); }
@@ -16,6 +16,11 @@ $stmt = get_db()->prepare('SELECT * FROM courriers_documents WHERE id = ?');
 $stmt->execute([$id]);
 $doc = $stmt->fetch();
 if (!$doc) { http_response_code(404); exit('Document introuvable.'); }
+
+$sc = get_db()->prepare('SELECT id, confidentialite, enregistre_par FROM courriers WHERE id = ?');
+$sc->execute([(int)$doc['courrier_id']]);
+$cour = $sc->fetch();
+if (!$cour || !courrier_peut_voir($cour)) { http_response_code(403); exit('Accès non autorisé.'); }
 
 // UPLOAD_DIR peut différer de APP_ROOT/uploads/ selon la configuration du serveur
 $candidats = [

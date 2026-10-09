@@ -7,15 +7,32 @@ require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../models/courrier.php';
 
 session_demarrer();
-exiger_permission('COURRIERS', 'VOIR');
+exiger_connexion();
+
+// Registre complet : permission VOIR. Sans elle, l'agent affecté ne voit que « Mes courriers ».
+$voit_registre = a_permission('COURRIERS', 'VOIR');
+if (!$voit_registre && courrier_nb_participations((int)user_id()) === 0) {
+    exiger_permission('COURRIERS', 'VOIR');
+}
+
+// Arrivée depuis le badge du menu : ouvrir le courrier de la notification la plus récente
+if (!empty($_GET['voir_alerte'])) {
+    $n = courrier_notif_premiere_non_lue((int)user_id());
+    if ($n) redirect('/modules/courriers/voir.php?id=' . (int)$n['courrier_id'] . '&focus=echanges');
+}
 
 $peut_creer     = a_permission('COURRIERS', 'CREER');
 $peut_modifier  = a_permission('COURRIERS', 'MODIFIER');
 $peut_valider   = a_permission('COURRIERS', 'VALIDER');
 $peut_supprimer = a_permission('COURRIERS', 'SUPPRIMER');
+$est_dg         = courrier_est_dg();
+$nb_mes         = courrier_nb_participations((int)user_id());
+$nb_a_valider   = $est_dg ? courrier_nb_a_valider() : 0;
 
 // Filtres
 $f = [
+    'mes'             => $voit_registre ? (!empty($_GET['mes']) ? '1' : '') : '1',
+    'a_valider'       => $est_dg && !empty($_GET['a_valider']) ? '1' : '',
     'q'               => clean($_GET['q']               ?? ''),
     'sens'            => clean($_GET['sens']            ?? ''),
     'statut'          => clean($_GET['statut']          ?? ''),
@@ -44,8 +61,8 @@ $CANAUX   = courrier_canaux();
 $TYPES    = courrier_types();
 $CONFS    = courrier_confidentialites();
 
-$page_titre      = 'Courriers';
-$page_breadcrumb = 'Gestion des Courriers — Registre';
+$page_titre      = $voit_registre ? 'Courriers' : 'Mes courriers';
+$page_breadcrumb = $voit_registre ? 'Gestion des Courriers — Registre' : 'Courriers qui vous sont affectés';
 $module_actif    = 'COURRIERS';
 include __DIR__ . '/../../views/layout/header.php';
 ?>
@@ -71,13 +88,26 @@ include __DIR__ . '/../../views/layout/header.php';
 .pager span.cur{background:var(--blue-600);color:#fff;border-color:var(--blue-600);}
 .pager .dots{border:none;background:none;}
 .retard{color:var(--danger);font-weight:700;}
+.vue-switch{display:flex;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:3px;gap:3px;}
+.vue-switch a{padding:6px 12px;border-radius:8px;font-size:.78rem;font-weight:600;color:var(--text-muted);text-decoration:none;}
+.vue-switch a.on{background:var(--surface);color:var(--blue-600);box-shadow:0 1px 4px rgba(13,50,120,.1);}
+.sc.alerte{border-color:#f59e0b;background:#fffbeb;}
+.sc.actif{border-color:var(--blue-500);box-shadow:0 0 0 3px var(--blue-100);}
 </style>
 
 <!-- En-tête -->
 <div style="display:flex;align-items:center;gap:14px;margin-bottom:22px;flex-wrap:wrap;">
   <div style="flex:1;font-size:.8rem;color:var(--text-muted);">
-    Registre centralisé des courriers entrants et sortants — réception, classement, orientation et suivi du traitement.
+    <?= $voit_registre
+        ? 'Registre centralisé des courriers entrants et sortants — réception, classement, orientation et suivi du traitement.'
+        : 'Les courriers dont vous êtes l\'agent pilote ou que vous suivez en copie.' ?>
   </div>
+  <?php if ($voit_registre && $nb_mes > 0): ?>
+    <div class="vue-switch">
+      <a href="index.php" class="<?= $f['mes'] ? '' : 'on' ?>"><i class="fa-solid fa-list"></i> Registre</a>
+      <a href="index.php?mes=1" class="<?= $f['mes'] ? 'on' : '' ?>"><i class="fa-solid fa-user-check"></i> Mes courriers (<?= $nb_mes ?>)</a>
+    </div>
+  <?php endif; ?>
   <?php if ($peut_creer): ?>
     <a href="sync.php" class="btn btn-success" title="Relever les nouveaux emails reçus sur info@crict.edu.gn"><i class="fa-solid fa-rotate"></i> Relever info@</a>
     <a href="form.php?sens=ENTRANT" class="btn btn-secondary"><i class="fa-solid fa-inbox"></i> Courrier entrant</a>
@@ -96,10 +126,14 @@ include __DIR__ . '/../../views/layout/header.php';
     ['val'=>$cpt['URGENTS'],       'lbl'=>'Urgents',       'color'=>'#dc2626',         'k'=>'priorite','v'=>'URGENTE'],
     ['val'=>$cpt['EN_RETARD'],     'lbl'=>'En retard',     'color'=>'#b91c1c',         'k'=>'','v'=>''],
   ];
+  if ($est_dg) {
+    array_splice($sd, 1, 0, [['val'=>$nb_a_valider, 'lbl'=>'À valider', 'color'=>'#b45309', 'k'=>'a_valider', 'v'=>'1']]);
+  }
   foreach ($sd as $s):
-    $qs = http_build_query(array_merge($f, [$s['k']=>$s['v'],'page'=>1]));
+    $qs = http_build_query(array_filter(array_merge($f, [$s['k']=>$s['v'],'page'=>1])));
+    $cls = ($s['k'] === 'a_valider' && $s['val'] > 0 ? ' alerte' : '') . ($s['k'] === 'a_valider' && $f['a_valider'] ? ' actif' : '');
   ?>
-  <div class="sc" <?= $s['k'] ? 'onclick="location.href=\'?'.$qs.'\'"' : '' ?>>
+  <div class="sc<?= $cls ?>" <?= $s['k'] ? 'onclick="location.href=\'?'.$qs.'\'"' : '' ?>>
     <div class="sc-val" style="color:<?= $s['color'] ?>;"><?= $s['val'] ?></div>
     <div class="sc-lbl"><?= $s['lbl'] ?></div>
   </div>
@@ -160,8 +194,8 @@ include __DIR__ . '/../../views/layout/header.php';
     <label>&nbsp;</label>
     <div style="display:flex;gap:6px;">
       <button class="btn btn-primary btn-sm" onclick="appF()"><i class="fa-solid fa-search"></i></button>
-      <?php if (array_filter($f)): ?>
-        <a href="index.php" class="btn btn-secondary btn-sm"><i class="fa-solid fa-xmark"></i></a>
+      <?php if (array_filter(array_diff_key($f, ['mes' => 1]))): ?>
+        <a href="index.php<?= $voit_registre && $f['mes'] ? '?mes=1' : '' ?>" class="btn btn-secondary btn-sm"><i class="fa-solid fa-xmark"></i></a>
       <?php endif; ?>
     </div>
   </div>
@@ -317,6 +351,7 @@ function appF() {
     canal:    document.getElementById("fcanal").value,
     priorite: document.getElementById("fpriorite").value,
     service_id: document.getElementById("fservice").value,
+    mes: "' . ($voit_registre ? $f['mes'] : '') . '",
     page: 1
   });
   for (const [k,v] of [...qs.entries()]) if(!v) qs.delete(k);

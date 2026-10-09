@@ -249,6 +249,17 @@ function courrier_template_affectation(array $user, array $courrier): string {
     $labels    = function_exists('courrier_priorites') ? courrier_priorites() : [];
     $prio_key  = $courrier['priorite'] ?? 'NORMALE';
     $prio_lbl  = $h($labels[$prio_key]['label'] ?? $prio_key);
+    $delai_row = '';
+    if (!empty($courrier['delai_pilote'])) {
+        $delai = $h(date('d/m/Y', strtotime($courrier['delai_pilote'])));
+        $delai_row = <<<HTML
+      <tr><td colspan="2" style="border-top:1px solid {$border};font-size:0;line-height:0;">&nbsp;</td></tr>
+      <tr>
+        <td style="padding:7px 0;font-size:12px;color:{$muted};text-transform:uppercase;letter-spacing:.5px;">Délai</td>
+        <td style="padding:7px 0;font-size:14px;color:#b91c1c;font-weight:700;">{$delai}</td>
+      </tr>
+HTML;
+    }
 
     $corps = <<<HTML
 <h1 style="margin:0 0 6px;font-size:18px;color:{$text};font-weight:700;">Bonjour {$prenoms},</h1>
@@ -280,6 +291,7 @@ function courrier_template_affectation(array $user, array $courrier): string {
         <td style="padding:7px 0;font-size:12px;color:{$muted};text-transform:uppercase;letter-spacing:.5px;">Priorité</td>
         <td style="padding:7px 0;font-size:14px;color:{$text};font-weight:600;">{$prio_lbl}</td>
       </tr>
+      {$delai_row}
     </table>
   </td></tr>
 </table>
@@ -305,6 +317,109 @@ HTML;
         htmlspecialchars(APP_SHORT, ENT_QUOTES),
         'Notification — Service Courrier',
         '&#128229;', // 📥
+        $corps
+    );
+}
+
+// ══════════════════════════════════════════════════════════
+// DIFFUSION DES ÉVÉNEMENTS DU TRAITEMENT
+// Notification ENT (badge « Courriers ») + email, sauf à l'auteur de l'action.
+//   $destinataires = [['id' ou 'utilisateur_id','prenoms','nom','email'], …]
+// ══════════════════════════════════════════════════════════
+function courrier_diffuser(array $destinataires, array $courrier, string $titre, string $intro, string $message = '', bool $email = true): int {
+    $moi = function_exists('user_id') ? (int)user_id() : 0;
+    $cid = (int)($courrier['id'] ?? 0);
+    $vus = [];
+    $n   = 0;
+    foreach ($destinataires as $u) {
+        // Lignes d'affectation : « id » est celui de l'affectation, l'utilisateur est « utilisateur_id »
+        $uid = (int)($u['utilisateur_id'] ?? $u['id'] ?? 0);
+        if ($uid <= 0 || $uid === $moi || isset($vus[$uid])) continue;
+        $vus[$uid] = true;
+        courrier_notif_creer($uid, $cid, $titre, $intro);
+        if ($email && filter_var($u['email'] ?? '', FILTER_VALIDATE_EMAIL)) {
+            $nom = trim(($u['prenoms'] ?? '') . ' ' . ($u['nom'] ?? ''));
+            $r = envoyer_email($u['email'], $nom,
+                $titre . ' — ' . ($courrier['reference'] ?? '') . ' — ' . APP_SHORT,
+                courrier_template_evenement($u, $courrier, $titre, $intro, $message));
+            if (!$r['succes']) error_log('[CRICT courrier_diffuser] ' . $u['email'] . ' : ' . $r['message']);
+        }
+        $n++;
+    }
+    return $n;
+}
+
+// Nouveaux courriers entrants → le DG est prévenu pour les orienter
+function courrier_notifier_nouveaux_entrants(array $courriers): void {
+    if (empty($courriers)) return;
+    $dgs = courrier_utilisateurs_dg();
+    if (count($courriers) === 1) {
+        $c = $courriers[0];
+        courrier_diffuser($dgs, $c, 'Nouveau courrier à orienter',
+            'Un courrier entrant de ' . ($c['correspondant_organisation'] ?: ($c['correspondant_nom'] ?: 'expéditeur inconnu'))
+            . ' vient d\'être enregistré : « ' . ($c['objet'] ?? '') . ' ». Il attend votre affectation.');
+        return;
+    }
+    // Plusieurs courriers (relève info@) : une notification ENT chacun, un seul email récapitulatif
+    $lignes = [];
+    foreach ($courriers as $c) {
+        courrier_diffuser($dgs, $c, 'Nouveau courrier à orienter', 'Courrier entrant « ' . ($c['objet'] ?? '') . ' » à affecter.', '', false);
+        $lignes[] = ($c['reference'] ?? '') . ' — ' . ($c['objet'] ?? '');
+    }
+    foreach ($dgs as $u) {
+        if (!filter_var($u['email'] ?? '', FILTER_VALIDATE_EMAIL)) continue;
+        $html = courrier_template_evenement($u, $courriers[0], count($courriers) . ' nouveaux courriers à orienter',
+            count($courriers) . ' courriers entrants viennent d\'être enregistrés et attendent votre affectation.',
+            implode("\n", $lignes), rtrim(APP_URL, '/') . '/modules/courriers/index.php?statut=RECU');
+        envoyer_email($u['email'], trim($u['prenoms'] . ' ' . $u['nom']), count($courriers) . ' nouveaux courriers à orienter — ' . APP_SHORT, $html);
+    }
+}
+
+// Template générique : un événement sur un courrier (soumission, validation, message…)
+function courrier_template_evenement(array $user, array $courrier, string $titre, string $intro, string $message = '', string $url = ''): string {
+    $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = '#1a2540'; $muted = '#6b7fa3'; $blue600 = '#1a5ccc'; $border = '#e2e8f5'; $teal = '#00c6a2';
+
+    $prenoms   = $h($user['prenoms'] ?? '');
+    $titre_h   = $h($titre);
+    $intro_h   = nl2br($h($intro));
+    $reference = $h($courrier['reference'] ?? '');
+    $objet     = $h($courrier['objet'] ?? '');
+    $url       = $h($url !== '' ? $url : rtrim(APP_URL, '/') . '/modules/courriers/voir.php?id=' . (int)($courrier['id'] ?? 0) . '&focus=echanges');
+    $bloc_msg  = trim($message) !== ''
+        ? '<div style="background:#f8fafc;border-left:4px solid ' . $blue600 . ';border-radius:8px;padding:12px 16px;margin:0 0 20px;font-size:13px;line-height:1.6;color:' . $text . ';">'
+          . nl2br($h($message)) . '</div>'
+        : '';
+
+    $corps = <<<HTML
+<h1 style="margin:0 0 6px;font-size:18px;color:{$text};font-weight:700;">Bonjour {$prenoms},</h1>
+<p style="margin:0 0 6px;font-size:15px;color:{$blue600};font-weight:700;">{$titre_h}</p>
+<p style="margin:0 0 18px;font-size:14px;line-height:1.65;color:{$muted};">{$intro_h}</p>
+{$bloc_msg}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="background:#f0f6ff;border:1px solid {$border};border-radius:12px;margin:0 0 20px;">
+  <tr><td style="padding:14px 20px;">
+    <div style="font-size:11px;color:{$muted};text-transform:uppercase;letter-spacing:.5px;">Courrier</div>
+    <div style="font-size:15px;color:{$blue600};font-weight:700;font-family:'Courier New',monospace;margin-top:2px;">{$reference}</div>
+    <div style="font-size:13px;color:{$text};margin-top:6px;">{$objet}</div>
+  </td></tr>
+</table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+  <td align="center" style="padding:2px 0 8px;">
+    <a href="{$url}" target="_blank"
+       style="display:inline-block;background:linear-gradient(135deg,{$blue600},{$teal});
+              color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;
+              padding:13px 38px;border-radius:10px;box-shadow:0 6px 18px rgba(26,92,204,.32);">
+      Ouvrir dans l'ENT &rarr;
+    </a>
+  </td>
+</tr></table>
+HTML;
+
+    return _crict_mail_wrap(
+        htmlspecialchars(APP_SHORT, ENT_QUOTES),
+        'Notification — Service Courrier',
+        '&#9993;', // ✉
         $corps
     );
 }

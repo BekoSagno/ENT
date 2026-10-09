@@ -92,9 +92,16 @@ function courrier_generer_reference(string $sens): string {
 // ──────────────────────────────────────────────────────────
 function courrier_lister(array $f = [], int $limite = 15, int $offset = 0): array {
     $db     = get_db();
-    $where  = ['1=1'];
-    $params = [];
+    [$acces, $params] = courrier_where_acces();
+    $where  = [$acces];
 
+    if (!empty($f['mes'])) {
+        $where[]  = 'EXISTS (SELECT 1 FROM courriers_affectations m WHERE m.courrier_id=c.id AND m.utilisateur_id=?)';
+        $params[] = (int)user_id();
+    }
+    if (!empty($f['a_valider'])) {
+        $where[] = "EXISTS (SELECT 1 FROM courriers_affectations v WHERE v.courrier_id=c.id AND v.role='PILOTE' AND v.statut='SOUMIS')";
+    }
     if (!empty($f['sens']))            { $where[] = 'c.sens = ?';            $params[] = $f['sens']; }
     if (!empty($f['statut']))          { $where[] = 'c.statut = ?';          $params[] = $f['statut']; }
     if (!empty($f['canal']))           { $where[] = 'c.canal = ?';           $params[] = $f['canal']; }
@@ -184,25 +191,27 @@ function courrier_charger(int $id): ?array {
 // Compteurs pour les cartes statistiques (par statut + sens)
 function courrier_compteurs(): array {
     $db = get_db();
+    [$acces, $p] = courrier_where_acces();
     $r = [
         'TOTAL'=>0,'ENTRANT'=>0,'SORTANT'=>0,
         'RECU'=>0,'AFFECTE'=>0,'EN_TRAITEMENT'=>0,'TRAITE'=>0,'CLOTURE'=>0,'ARCHIVE'=>0,
         'URGENTS'=>0,'EN_RETARD'=>0,
     ];
-    foreach ($db->query("SELECT statut, COUNT(*) n FROM courriers GROUP BY statut")->fetchAll() as $row) {
+    $q = function (string $sql) use ($db, $p) { $s = $db->prepare($sql); $s->execute($p); return $s; };
+    foreach ($q("SELECT statut, COUNT(*) n FROM courriers c WHERE $acces GROUP BY statut")->fetchAll() as $row) {
         $r[$row['statut']] = (int)$row['n'];
         $r['TOTAL'] += (int)$row['n'];
     }
-    foreach ($db->query("SELECT sens, COUNT(*) n FROM courriers GROUP BY sens")->fetchAll() as $row) {
+    foreach ($q("SELECT sens, COUNT(*) n FROM courriers c WHERE $acces GROUP BY sens")->fetchAll() as $row) {
         $r[$row['sens']] = (int)$row['n'];
     }
-    $r['URGENTS'] = (int)$db->query("
-        SELECT COUNT(*) FROM courriers
-        WHERE priorite='URGENTE' AND statut NOT IN ('TRAITE','CLOTURE','ARCHIVE')
+    $r['URGENTS'] = (int)$q("
+        SELECT COUNT(*) FROM courriers c
+        WHERE $acces AND priorite='URGENTE' AND statut NOT IN ('TRAITE','CLOTURE','ARCHIVE')
     ")->fetchColumn();
-    $r['EN_RETARD'] = (int)$db->query("
-        SELECT COUNT(*) FROM courriers
-        WHERE date_echeance IS NOT NULL AND date_echeance < CURDATE()
+    $r['EN_RETARD'] = (int)$q("
+        SELECT COUNT(*) FROM courriers c
+        WHERE $acces AND date_echeance IS NOT NULL AND date_echeance < CURDATE()
           AND statut NOT IN ('TRAITE','CLOTURE','ARCHIVE')
     ")->fetchColumn();
     return $r;
@@ -340,6 +349,9 @@ function courrier_supprimer(int $id): array {
 
         $db->prepare('DELETE FROM courriers_documents WHERE courrier_id=?')->execute([$id]);
         $db->prepare('DELETE FROM courriers_suivi WHERE courrier_id=?')->execute([$id]);
+        foreach (['courriers_affectations', 'courriers_echanges', 'courriers_notifications'] as $t) {
+            try { $db->prepare("DELETE FROM $t WHERE courrier_id=?")->execute([$id]); } catch (Throwable $e) {}
+        }
         $db->prepare('DELETE FROM courriers WHERE id=?')->execute([$id]);
 
         log_activite(user_id(), 'COURRIERS', 'SUPPRESSION', "Courrier ID $id supprimé");
@@ -556,5 +568,422 @@ function courrier_doc_enregistrer(int $cid, string $nom_original, string $conten
         @unlink($abs);
         error_log('[CRICT courrier_doc_enregistrer] '.$e->getMessage());
         return ['succes'=>false,'message'=>'Erreur base de données.'];
+    }
+}
+
+// ══════════════════════════════════════════════════════════
+// TRAITEMENT : affectation par le DG, pilote + copies,
+// soumission / validation, fil d'échanges, notifications
+// ══════════════════════════════════════════════════════════
+
+// DG ou super administrateur : seuls habilités à affecter et valider
+function courrier_est_dg(): bool {
+    return in_array(user_groupe() ?? '', ['SUPER_ADMIN', 'DG'], true);
+}
+
+// Crée au besoin les tables du traitement (sans effet si elles existent)
+function courrier_assurer_schema(): void {
+    static $fait = false;
+    if ($fait) return;
+    $fait = true;
+    $db = get_db();
+    $tables = [
+        'courriers_affectations' => "
+            id             int UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            courrier_id    int UNSIGNED NOT NULL,
+            utilisateur_id int UNSIGNED NOT NULL,
+            role           enum('PILOTE','COPIE') NOT NULL DEFAULT 'PILOTE',
+            statut         enum('A_TRAITER','EN_COURS','SOUMIS','VALIDE') NOT NULL DEFAULT 'A_TRAITER',
+            date_limite    date DEFAULT NULL,
+            affecte_par    int UNSIGNED DEFAULT NULL,
+            vue_le         datetime DEFAULT NULL,
+            soumis_le      datetime DEFAULT NULL,
+            cree_le        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_ca_cour_user (courrier_id, utilisateur_id),
+            KEY idx_ca_user (utilisateur_id, role)",
+        'courriers_echanges' => "
+            id          int UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            courrier_id int UNSIGNED NOT NULL,
+            auteur_id   int UNSIGNED DEFAULT NULL,
+            type        enum('MESSAGE','AFFECTATION','SOUMISSION','VALIDATION','REJET','CLOTURE') NOT NULL DEFAULT 'MESSAGE',
+            message     text DEFAULT NULL,
+            cree_le     datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_ce_cour (courrier_id)",
+        'courriers_notifications' => "
+            id             int UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            utilisateur_id int UNSIGNED NOT NULL,
+            courrier_id    int UNSIGNED NOT NULL,
+            titre          varchar(150) NOT NULL,
+            message        varchar(500) DEFAULT NULL,
+            lu             tinyint(1) NOT NULL DEFAULT 0,
+            cree_le        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_cn_user (utilisateur_id, lu),
+            KEY idx_cn_cour (courrier_id)",
+    ];
+    $fk = [
+        'courriers_affectations'  => 'CONSTRAINT fk_ca_courrier FOREIGN KEY (courrier_id) REFERENCES courriers(id) ON DELETE CASCADE',
+        'courriers_echanges'      => 'CONSTRAINT fk_ce_courrier FOREIGN KEY (courrier_id) REFERENCES courriers(id) ON DELETE CASCADE',
+        'courriers_notifications' => 'CONSTRAINT fk_cn_courrier FOREIGN KEY (courrier_id) REFERENCES courriers(id) ON DELETE CASCADE',
+    ];
+    $suffixe = ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
+    foreach ($tables as $nom => $cols) {
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS $nom ($cols, {$fk[$nom]}$suffixe");
+        } catch (Throwable $e) {
+            try { $db->exec("CREATE TABLE IF NOT EXISTS $nom ($cols$suffixe"); }
+            catch (Throwable $e2) { error_log("[CRICT courriers] CREATE $nom : " . $e2->getMessage()); }
+        }
+    }
+}
+
+// ── Participants ─────────────────────────────────────────
+
+function courrier_affectations(int $cid): array {
+    courrier_assurer_schema();
+    $s = get_db()->prepare("
+        SELECT a.*, CONCAT(u.prenoms,' ',u.nom) AS nom_complet, u.prenoms, u.nom, u.email,
+               g.libelle AS groupe
+        FROM courriers_affectations a
+        JOIN utilisateurs u              ON u.id = a.utilisateur_id
+        LEFT JOIN groupes_utilisateurs g ON g.id = u.groupe_id
+        WHERE a.courrier_id=?
+        ORDER BY a.role='COPIE', u.prenoms, u.nom
+    ");
+    $s->execute([$cid]);
+    return $s->fetchAll();
+}
+
+function courrier_participation(int $cid, int $uid): ?array {
+    if ($uid <= 0) return null;
+    try {
+        $s = get_db()->prepare('SELECT * FROM courriers_affectations WHERE courrier_id=? AND utilisateur_id=? LIMIT 1');
+        $s->execute([$cid, $uid]);
+        return $s->fetch() ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+// L'utilisateur est-il pilote ou en copie d'au moins un courrier ? (menu / registre)
+function courrier_nb_participations(int $uid): int {
+    if ($uid <= 0) return 0;
+    try {
+        $s = get_db()->prepare('SELECT COUNT(*) FROM courriers_affectations WHERE utilisateur_id=?');
+        $s->execute([$uid]);
+        return (int)$s->fetchColumn();
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+// ── Droits d'accès ───────────────────────────────────────
+// Registre : permission VOIR. Agents affectés : leurs courriers seulement.
+// « Secret » : DG, super admin, enregistreur et agents affectés uniquement.
+
+function courrier_peut_voir(array $cour): bool {
+    $uid = (int)user_id();
+    if (courrier_est_dg()) return true;
+    $participant = courrier_participation((int)$cour['id'], $uid) !== null;
+    if (($cour['confidentialite'] ?? '') === 'SECRET') {
+        return $participant || (int)($cour['enregistre_par'] ?? 0) === $uid;
+    }
+    return $participant || a_permission('COURRIERS', 'VOIR');
+}
+
+// Condition SQL d'accès pour la table aliasée « c »
+function courrier_where_acces(): array {
+    courrier_assurer_schema();
+    if (courrier_est_dg()) return ['1=1', []];
+    $uid  = (int)user_id();
+    $part = 'EXISTS (SELECT 1 FROM courriers_affectations ca WHERE ca.courrier_id=c.id AND ca.utilisateur_id=?)';
+    if (!a_permission('COURRIERS', 'VOIR')) return [$part, [$uid]];
+    return ["(c.confidentialite<>'SECRET' OR c.enregistre_par=? OR $part)", [$uid, $uid]];
+}
+
+// ── Organigramme ─────────────────────────────────────────
+
+// Unités actives à plat, dans l'ordre de l'arbre, avec profondeur et responsable (utilisateur)
+function courrier_services_arbre(): array {
+    $rows = get_db()->query("
+        SELECT uo.id, uo.nom, uo.code, uo.type, uo.parent_id,
+               rp.utilisateur_id AS resp_user_id,
+               CONCAT_WS(' ', ru.prenoms, ru.nom) AS resp_nom
+        FROM unites_organisationnelles uo
+        LEFT JOIN personnel rp    ON rp.id = uo.responsable_id
+        LEFT JOIN utilisateurs ru ON ru.id = rp.utilisateur_id AND ru.statut='ACTIF'
+        WHERE uo.actif=1
+        ORDER BY uo.nom
+    ")->fetchAll();
+    $par_parent = [];
+    $ids = array_column($rows, 'id');
+    foreach ($rows as $r) {
+        $p = ($r['parent_id'] && in_array($r['parent_id'], $ids)) ? (int)$r['parent_id'] : 0;
+        $par_parent[$p][] = $r;
+    }
+    $plat = [];
+    $parcourir = function (int $parent, int $niveau) use (&$parcourir, &$plat, $par_parent) {
+        foreach ($par_parent[$parent] ?? [] as $r) {
+            if (empty($r['resp_nom'])) $r['resp_user_id'] = null;
+            $r['niveau'] = $niveau;
+            $plat[] = $r;
+            $parcourir((int)$r['id'], $niveau + 1);
+        }
+    };
+    $parcourir(0, 0);
+    return $plat;
+}
+
+function courrier_utilisateurs_dg(): array {
+    return get_db()->query("
+        SELECT u.id, u.prenoms, u.nom, u.email
+        FROM utilisateurs u JOIN groupes_utilisateurs g ON g.id=u.groupe_id
+        WHERE g.code='DG' AND u.statut='ACTIF'
+    ")->fetchAll();
+}
+
+// ── Fil d'échanges ───────────────────────────────────────
+
+function courrier_echanges(int $cid): array {
+    courrier_assurer_schema();
+    $s = get_db()->prepare("
+        SELECT ec.*, CONCAT(u.prenoms,' ',u.nom) AS auteur_nom, g.code AS auteur_groupe
+        FROM courriers_echanges ec
+        LEFT JOIN utilisateurs u         ON u.id = ec.auteur_id
+        LEFT JOIN groupes_utilisateurs g ON g.id = u.groupe_id
+        WHERE ec.courrier_id=?
+        ORDER BY ec.cree_le, ec.id
+    ");
+    $s->execute([$cid]);
+    return $s->fetchAll();
+}
+
+function courrier_echange_ajouter(int $cid, string $message, string $type = 'MESSAGE'): array {
+    $message = trim($message);
+    if ($message === '' && $type === 'MESSAGE') return ['succes'=>false,'message'=>'Le message est vide.'];
+    courrier_assurer_schema();
+    try {
+        get_db()->prepare("INSERT INTO courriers_echanges (courrier_id, auteur_id, type, message) VALUES (?,?,?,?)")
+                ->execute([$cid, user_id(), $type, $message !== '' ? $message : null]);
+        return ['succes'=>true];
+    } catch (Throwable $e) {
+        error_log('[CRICT courrier_echange] '.$e->getMessage());
+        return ['succes'=>false,'message'=>'Erreur lors de l\'envoi du message.'];
+    }
+}
+
+// ── Affectation (DG) ─────────────────────────────────────
+// Remplace l'équipe : 1 pilote (traite + soumet) et des agents en copie (information + messages).
+// Retour : ['succes', 'nouveaux' => [user_id => 'PILOTE'|'COPIE']]
+function courrier_affecter_equipe(int $cid, ?int $service_id, int $pilote, array $copies, ?string $date_limite, string $instruction): array {
+    if (!courrier_est_dg()) return ['succes'=>false,'message'=>'Seuls le DG et le super administrateur peuvent affecter un courrier.'];
+    if ($pilote <= 0)        return ['succes'=>false,'message'=>'Choisissez l\'agent pilote.'];
+    if ($date_limite !== null && $date_limite !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date_limite))
+        return ['succes'=>false,'message'=>'Le délai de traitement est invalide.'];
+    $copies = array_values(array_unique(array_filter(array_map('intval', $copies), fn($id) => $id > 0 && $id !== $pilote)));
+
+    $db = get_db();
+    courrier_assurer_schema();
+    try {
+        $s = $db->prepare('SELECT statut FROM courriers WHERE id=?');
+        $s->execute([$cid]);
+        $ancien = $s->fetchColumn();
+        if ($ancien === false) return ['succes'=>false,'message'=>'Courrier introuvable.'];
+        if (!in_array($ancien, ['RECU','AFFECTE','EN_TRAITEMENT'], true))
+            return ['succes'=>false,'message'=>'Ce courrier est déjà traité : il ne peut plus être affecté.'];
+
+        $avant = [];
+        foreach (courrier_affectations($cid) as $a) $avant[(int)$a['utilisateur_id']] = $a;
+
+        $db->beginTransaction();
+        $garder = array_merge([$pilote], $copies);
+        $place  = implode(',', array_fill(0, count($garder), '?'));
+        $db->prepare("DELETE FROM courriers_affectations WHERE courrier_id=? AND utilisateur_id NOT IN ($place)")
+           ->execute(array_merge([$cid], $garder));
+
+        $nouveaux = [];
+        $ins = $db->prepare("INSERT INTO courriers_affectations (courrier_id, utilisateur_id, role, statut, date_limite, affecte_par)
+                             VALUES (?,?,?,?,?,?)
+                             ON DUPLICATE KEY UPDATE role=VALUES(role), date_limite=VALUES(date_limite), affecte_par=VALUES(affecte_par),
+                                                     statut=IF(VALUES(role)='COPIE', 'A_TRAITER', statut)");
+        $dl = $date_limite ?: null;
+        $ins->execute([$cid, $pilote, 'PILOTE', 'A_TRAITER', $dl, user_id()]);
+        if (($avant[$pilote]['role'] ?? '') !== 'PILOTE') {
+            $nouveaux[$pilote] = 'PILOTE';
+            // Nouveau pilote : on repart de zéro
+            $db->prepare("UPDATE courriers_affectations SET statut='A_TRAITER', soumis_le=NULL, vue_le=NULL WHERE courrier_id=? AND utilisateur_id=?")
+               ->execute([$cid, $pilote]);
+        }
+        foreach ($copies as $uid) {
+            $ins->execute([$cid, $uid, 'COPIE', 'A_TRAITER', null, user_id()]);
+            if (!isset($avant[$uid])) $nouveaux[$uid] = 'COPIE';
+        }
+
+        $nouveau_statut = $ancien === 'RECU' ? 'AFFECTE' : $ancien;
+        if (isset($nouveaux[$pilote]) && $ancien === 'EN_TRAITEMENT') $nouveau_statut = 'AFFECTE';
+        $db->prepare("UPDATE courriers SET service_id=?, affecte_a=?, instruction=?, statut=? WHERE id=?")
+           ->execute([$service_id ?: null, $pilote, trim($instruction) !== '' ? trim($instruction) : null, $nouveau_statut, $cid]);
+        $db->commit();
+
+        $noms = [];
+        foreach (courrier_affectations($cid) as $a) {
+            $noms[] = $a['nom_complet'] . ($a['role'] === 'PILOTE' ? ' (pilote)' : ' (copie)');
+        }
+        $resume = 'Affecté à : ' . implode(', ', $noms)
+                . ($dl ? ' — délai : ' . date('d/m/Y', strtotime($dl)) : '')
+                . (trim($instruction) !== '' ? "\nInstruction : " . trim($instruction) : '');
+        courrier_suivi_ajouter($cid, empty($avant) ? 'AFFECTATION' : 'REAFFECTATION', $resume, $ancien, $nouveau_statut);
+        courrier_echange_ajouter($cid, $resume, 'AFFECTATION');
+        log_activite(user_id(), 'COURRIERS', 'AFFECTATION', "Courrier $cid affecté (pilote $pilote, " . count($copies) . ' copie(s))');
+        return ['succes'=>true, 'nouveaux'=>$nouveaux];
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        error_log('[CRICT courrier_affecter_equipe] '.$e->getMessage());
+        return ['succes'=>false,'message'=>'Erreur lors de l\'affectation.'];
+    }
+}
+
+// ── Traitement par le pilote ─────────────────────────────
+
+function courrier_marquer_vu(int $cid, int $uid): void {
+    try {
+        get_db()->prepare('UPDATE courriers_affectations SET vue_le=NOW() WHERE courrier_id=? AND utilisateur_id=? AND vue_le IS NULL')
+                ->execute([$cid, $uid]);
+    } catch (Throwable $e) {}
+}
+
+function courrier_commencer(int $cid, int $uid): array {
+    $p = courrier_participation($cid, $uid);
+    if (!$p || $p['role'] !== 'PILOTE') return ['succes'=>false,'message'=>'Seul l\'agent pilote peut démarrer le traitement.'];
+    if ($p['statut'] !== 'A_TRAITER')   return ['succes'=>false,'message'=>'Le traitement est déjà en cours.'];
+    $db = get_db();
+    $db->prepare("UPDATE courriers_affectations SET statut='EN_COURS', vue_le=COALESCE(vue_le, NOW()) WHERE id=?")->execute([$p['id']]);
+    $s = $db->prepare('SELECT statut FROM courriers WHERE id=?');
+    $s->execute([$cid]);
+    $ancien = (string)$s->fetchColumn();
+    if (in_array($ancien, ['RECU','AFFECTE'], true)) {
+        $db->prepare("UPDATE courriers SET statut='EN_TRAITEMENT' WHERE id=?")->execute([$cid]);
+    }
+    courrier_suivi_ajouter($cid, 'TRAITEMENT', 'Traitement démarré par l\'agent pilote', $ancien, 'EN_TRAITEMENT');
+    return ['succes'=>true];
+}
+
+function courrier_soumettre(int $cid, int $uid, string $message): array {
+    $message = trim($message);
+    $p = courrier_participation($cid, $uid);
+    if (!$p || $p['role'] !== 'PILOTE') return ['succes'=>false,'message'=>'Seul l\'agent pilote peut soumettre le traitement.'];
+    if ($p['statut'] === 'SOUMIS')      return ['succes'=>false,'message'=>'Déjà soumis : en attente de la validation du DG.'];
+    if ($p['statut'] === 'VALIDE')      return ['succes'=>false,'message'=>'Ce traitement est déjà validé.'];
+    if ($message === '')                return ['succes'=>false,'message'=>'Décrivez le traitement effectué.'];
+    $db = get_db();
+    $db->prepare("UPDATE courriers_affectations SET statut='SOUMIS', soumis_le=NOW(), vue_le=COALESCE(vue_le, NOW()) WHERE id=?")
+       ->execute([$p['id']]);
+    $s = $db->prepare('SELECT statut FROM courriers WHERE id=?');
+    $s->execute([$cid]);
+    $ancien = (string)$s->fetchColumn();
+    if (in_array($ancien, ['RECU','AFFECTE'], true)) {
+        $db->prepare("UPDATE courriers SET statut='EN_TRAITEMENT' WHERE id=?")->execute([$cid]);
+    }
+    courrier_echange_ajouter($cid, $message, 'SOUMISSION');
+    courrier_suivi_ajouter($cid, 'SOUMISSION', 'Traitement soumis au DG pour validation', $ancien, 'EN_TRAITEMENT');
+    log_activite($uid, 'COURRIERS', 'SOUMISSION', "Courrier $cid soumis au DG");
+    return ['succes'=>true];
+}
+
+// ── Décision du DG ───────────────────────────────────────
+
+function courrier_pilote(int $cid): ?array {
+    foreach (courrier_affectations($cid) as $a) if ($a['role'] === 'PILOTE') return $a;
+    return null;
+}
+
+function courrier_valider(int $cid, string $message = ''): array {
+    if (!courrier_est_dg()) return ['succes'=>false,'message'=>'Seul le DG peut valider le traitement.'];
+    $p = courrier_pilote($cid);
+    if (!$p || $p['statut'] !== 'SOUMIS') return ['succes'=>false,'message'=>'Aucun traitement en attente de validation.'];
+    $db = get_db();
+    $db->prepare("UPDATE courriers_affectations SET statut='VALIDE' WHERE id=?")->execute([$p['id']]);
+    $s = $db->prepare('SELECT statut FROM courriers WHERE id=?');
+    $s->execute([$cid]);
+    $ancien = (string)$s->fetchColumn();
+    $db->prepare("UPDATE courriers SET statut='TRAITE', traite_par=?, date_traitement=NOW() WHERE id=?")
+       ->execute([(int)$p['utilisateur_id'], $cid]);
+    courrier_echange_ajouter($cid, $message, 'VALIDATION');
+    courrier_suivi_ajouter($cid, 'VALIDATION', 'Traitement validé par le DG' . (trim($message) !== '' ? ' : ' . trim($message) : ''), $ancien, 'TRAITE');
+    log_activite(user_id(), 'COURRIERS', 'VALIDATION', "Courrier $cid validé");
+    return ['succes'=>true, 'pilote'=>$p];
+}
+
+function courrier_rejeter(int $cid, string $motif): array {
+    $motif = trim($motif);
+    if (!courrier_est_dg()) return ['succes'=>false,'message'=>'Seul le DG peut renvoyer le traitement.'];
+    if ($motif === '')      return ['succes'=>false,'message'=>'Précisez ce qui doit être revu.'];
+    $p = courrier_pilote($cid);
+    if (!$p || $p['statut'] !== 'SOUMIS') return ['succes'=>false,'message'=>'Aucun traitement en attente de validation.'];
+    get_db()->prepare("UPDATE courriers_affectations SET statut='EN_COURS', soumis_le=NULL WHERE id=?")->execute([$p['id']]);
+    courrier_echange_ajouter($cid, $motif, 'REJET');
+    courrier_suivi_ajouter($cid, 'RENVOI', 'Traitement renvoyé au pilote : ' . $motif, 'EN_TRAITEMENT', 'EN_TRAITEMENT');
+    log_activite(user_id(), 'COURRIERS', 'REJET', "Courrier $cid renvoyé au pilote");
+    return ['succes'=>true, 'pilote'=>$p];
+}
+
+function courrier_cloturer(int $cid, string $commentaire = ''): array {
+    if (!courrier_est_dg()) return ['succes'=>false,'message'=>'Seul le DG peut clôturer un courrier.'];
+    $res = courrier_changer_statut($cid, 'CLOTURE', trim($commentaire) !== '' ? 'Clôturé : ' . trim($commentaire) : 'Courrier clôturé');
+    if ($res['succes']) courrier_echange_ajouter($cid, $commentaire, 'CLOTURE');
+    return $res;
+}
+
+// ── Notifications internes (badge du menu « Courriers ») ─
+
+function courrier_notif_creer(int $uid, int $cid, string $titre, string $message = ''): void {
+    if ($uid <= 0 || $cid <= 0) return;
+    courrier_assurer_schema();
+    try {
+        get_db()->prepare("INSERT INTO courriers_notifications (utilisateur_id, courrier_id, titre, message) VALUES (?,?,?,?)")
+                ->execute([$uid, $cid, mb_substr($titre, 0, 150), $message !== '' ? mb_substr($message, 0, 500) : null]);
+    } catch (Throwable $e) {
+        error_log('[CRICT courriers] notif : '.$e->getMessage());
+    }
+}
+
+// Appelée par le menu sur chaque page : ne crée pas la table, renvoie 0 si elle n'existe pas encore
+function courrier_notifs_non_lues(int $uid): int {
+    if ($uid <= 0) return 0;
+    try {
+        $s = get_db()->prepare("SELECT COUNT(*) FROM courriers_notifications n JOIN courriers c ON c.id=n.courrier_id
+                                WHERE n.utilisateur_id=? AND n.lu=0");
+        $s->execute([$uid]);
+        return (int)$s->fetchColumn();
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+function courrier_notif_premiere_non_lue(int $uid): ?array {
+    if ($uid <= 0) return null;
+    try {
+        $s = get_db()->prepare("SELECT n.* FROM courriers_notifications n JOIN courriers c ON c.id=n.courrier_id
+                                WHERE n.utilisateur_id=? AND n.lu=0 ORDER BY n.cree_le DESC, n.id DESC LIMIT 1");
+        $s->execute([$uid]);
+        return $s->fetch() ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function courrier_notif_marquer_lues(int $uid, int $cid): void {
+    try {
+        get_db()->prepare("UPDATE courriers_notifications SET lu=1 WHERE utilisateur_id=? AND courrier_id=? AND lu=0")
+                ->execute([$uid, $cid]);
+    } catch (Throwable $e) {}
+}
+
+// Nombre de traitements soumis en attente de la décision du DG
+function courrier_nb_a_valider(): int {
+    try {
+        return (int)get_db()->query("SELECT COUNT(*) FROM courriers_affectations a JOIN courriers c ON c.id=a.courrier_id
+                                     WHERE a.role='PILOTE' AND a.statut='SOUMIS'")->fetchColumn();
+    } catch (Throwable $e) {
+        return 0;
     }
 }
