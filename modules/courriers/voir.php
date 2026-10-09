@@ -31,12 +31,22 @@ $est_pilote = $ma_part && $ma_part['role'] === 'PILOTE';
 if ($ma_part) courrier_marquer_vu($cid, $uid);
 courrier_notif_marquer_lues($uid, $cid);
 
-$peut_modifier  = a_permission('COURRIERS', 'MODIFIER');
+$entrant        = $cour['sens'] === 'ENTRANT';
+$peut_modifier  = a_permission('COURRIERS', 'MODIFIER') && !courrier_sortant_verrouille($cour);
 $peut_supprimer = a_permission('COURRIERS', 'SUPPRIMER');
-$peut_affecter  = $est_dg && in_array($cour['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true);
-$peut_archiver  = ($est_dg || a_permission('COURRIERS', 'VALIDER')) && in_array($cour['statut'], ['TRAITE', 'CLOTURE'], true);
-$peut_cloturer  = $est_dg && !in_array($cour['statut'], ['CLOTURE', 'ARCHIVE'], true);
-$peut_ecrire    = $est_dg || $ma_part !== null;
+$peut_affecter  = $entrant && $est_dg && in_array($cour['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true);
+$peut_archiver  = ($est_dg || a_permission('COURRIERS', 'VALIDER'))
+                  && in_array($cour['statut'], $entrant ? ['TRAITE', 'CLOTURE'] : ['CLOTURE'], true);
+$peut_cloturer  = $entrant && $est_dg && !in_array($cour['statut'], ['CLOTURE', 'ARCHIVE'], true);
+$peut_ecrire    = courrier_peut_ecrire($cour);
+// Sortant : validation du DG puis envoi
+$sortant_a_valider = !$entrant && in_array($cour['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true);
+$peut_valider_s    = !$entrant && $est_dg && $sortant_a_valider;
+$peut_renvoyer_s   = !$entrant && $est_dg && in_array($cour['statut'], ['RECU', 'AFFECTE', 'TRAITE'], true);
+$peut_resoumettre  = courrier_peut_resoumettre($cour);
+$peut_expedier     = courrier_peut_expedier($cour);
+$envoi_email       = $cour['canal'] === 'EMAIL';
+$dernier_envoi     = $entrant ? null : courrier_dernier_envoi($cour);
 $pilote_statut  = $pilote['statut'] ?? null;
 $focus_fil      = ($_GET['focus'] ?? '') === 'echanges';
 
@@ -46,13 +56,12 @@ $CANAUX  = courrier_canaux();
 $TYPES   = courrier_types();
 $CONFS   = courrier_confidentialites();
 
-$st = $STATUTS[$cour['statut']]          ?? $STATUTS['RECU'];
+$st = courrier_statut_info($cour['statut'], $cour['sens']);
 $pr = $PRIOS[$cour['priorite']]          ?? $PRIOS['NORMALE'];
 $cn = $CANAUX[$cour['canal']]            ?? $CANAUX['AUTRE'];
 $cf = $CONFS[$cour['confidentialite']]   ?? $CONFS['NORMAL'];
-$entrant   = $cour['sens'] === 'ENTRANT';
 $en_retard = !empty($cour['date_echeance']) && $cour['date_echeance'] < date('Y-m-d')
-             && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true);
+             && !in_array($cour['statut'], courrier_statuts_termines($cour['sens']), true);
 $delai_depasse = $pilote && !empty($pilote['date_limite']) && $pilote['date_limite'] < date('Y-m-d')
                  && in_array($pilote_statut, ['A_TRAITER', 'EN_COURS'], true);
 
@@ -75,7 +84,7 @@ $etapes_circuit = ['RECU' => 'Reçu', 'AFFECTE' => 'Affecté', 'EN_TRAITEMENT' =
 $etape = $cour['statut'];
 if ($pilote_statut === 'SOUMIS' && in_array($etape, ['AFFECTE', 'EN_TRAITEMENT'], true)) $etape = 'SOUMIS';
 if ($etape === 'ARCHIVE') $etape = 'CLOTURE';
-$idx_etape = array_search($etape, array_keys($etapes_circuit), true);
+$idx_etape = $etape === 'CLOTURE' ? count($etapes_circuit) : array_search($etape, array_keys($etapes_circuit), true);
 
 $nom_pilote = $pilote['nom_complet'] ?? ($cour['affecte_nom'] ?? '');
 if ($cour['statut'] === 'RECU') {
@@ -97,6 +106,46 @@ if ($cour['statut'] === 'RECU') {
             : ' — traitement en cours.');
 } else {
     $etat = 'Affecté à ' . e($nom_pilote ?: '—') . '.' . ($est_dg ? ' Réaffectez-le pour désigner un agent pilote et des agents en copie.' : '');
+}
+$etat_classe = $pilote_statut === 'SOUMIS' && $est_dg ? 'attente' : (in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true) ? 'ok' : '');
+
+// Sortant : Enregistré → Validation du DG → Envoi → Envoyé
+if (!$entrant) {
+    $mot_envoye     = $envoi_email ? 'Envoyé' : 'Expédié';
+    $etapes_circuit = ['ENR' => 'Enregistré', 'VALID' => 'Validation du DG', 'ENVOI' => $envoi_email ? 'Envoi par email' : 'Expédition', 'FAIT' => $mot_envoye];
+    $idx_etape      = match (true) {
+        $sortant_a_valider            => 1,
+        $cour['statut'] === 'TRAITE'  => 2,
+        default                       => count($etapes_circuit),
+    };
+    $dernier_renvoi = null;
+    foreach ($echanges as $m) if ($m['type'] === 'REJET') $dernier_renvoi = $m;
+    $date_valid = !empty($cour['date_traitement']) ? ' le ' . format_datetime($cour['date_traitement']) : '';
+
+    if ($cour['statut'] === 'EN_TRAITEMENT') {
+        $etat = 'Renvoyé pour correction par le DG' . ($dernier_renvoi ? ' : « ' . e($dernier_renvoi['message']) . ' »' : '.')
+              . ($peut_resoumettre ? '<br>Modifiez le courrier ou ses pièces jointes, puis soumettez-le à nouveau.' : '');
+        $etat_classe = 'attente';
+    } elseif ($sortant_a_valider) {
+        $etat = $est_dg ? 'Ce courrier sortant attend votre validation : vérifiez la lettre et les pièces jointes avant l\'envoi.'
+                        : 'En attente de la validation du DG avant l\'envoi.';
+        $etat_classe = $est_dg ? 'attente' : '';
+    } elseif ($cour['statut'] === 'TRAITE') {
+        $etat = 'Validé par le DG' . $date_valid . '. ';
+        if ($peut_expedier) {
+            $etat .= $envoi_email ? 'Vous pouvez l\'envoyer à ' . e($cour['correspondant_email'] ?: 'son destinataire') . '.'
+                                  : 'Une fois la lettre remise ou postée, marquez-la comme expédiée.';
+        } else {
+            $etat .= 'En attente d\'envoi par la personne qui l\'a enregistré.';
+        }
+        $etat_classe = 'ok';
+    } else {
+        $etat = $dernier_envoi
+            ? e($dernier_envoi['commentaire']) . ' (' . format_datetime($dernier_envoi['cree_le']) . (!empty($dernier_envoi['auteur']) ? ', par ' . e($dernier_envoi['auteur']) : '') . ').'
+            : $mot_envoye . '.';
+        if ($cour['statut'] === 'ARCHIVE') $etat .= ' Courrier archivé.';
+        $etat_classe = 'ok';
+    }
 }
 
 $page_titre      = 'Courrier ' . e($cour['reference']);
@@ -201,6 +250,14 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
 .resp-fonc{font-size:.72rem;color:var(--text-muted);}
 .resp-empty{padding:12px;margin:0;font-size:.8rem;color:var(--text-muted);text-align:center;}
 .hint{font-size:.72rem;color:var(--text-muted);margin-top:5px;}
+.pj-list{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.pj-item{display:flex;align-items:center;gap:9px;padding:8px 12px;margin:0;border-bottom:1px solid var(--border);cursor:pointer;font-size:.82rem;font-weight:500;}
+.pj-item:last-child{border-bottom:0;}
+.pj-item:hover{background:var(--blue-50);}
+.pj-item i{color:var(--text-muted);font-size:.75rem;}
+.pj-nom{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.pj-taille{font-size:.72rem;color:var(--text-muted);}
+#pjTotal.trop{color:var(--danger);font-weight:700;}
 .req{color:var(--danger);}
 .row-2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;}
 @media(max-width:600px){.row-2{grid-template-columns:1fr;}}
@@ -301,10 +358,13 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
         <?= !empty($cour['date_echeance']) ? format_date($cour['date_echeance']) : $val(null) ?>
       </div>
     </div>
+    <?php if ($entrant || !empty($cour['service_nom'])): ?>
     <div class="info-block">
       <div class="ib-lbl"><i class="fa-solid fa-sitemap"></i> Service concerné</div>
       <div class="ib-val"><?= $val($cour['service_nom']) ?></div>
     </div>
+    <?php endif; ?>
+    <?php if ($entrant || $affectations): ?>
     <div class="info-block">
       <div class="ib-lbl"><i class="fa-solid fa-user-gear"></i> Agent pilote</div>
       <div class="ib-val"><?= $val($nom_pilote) ?></div>
@@ -318,9 +378,10 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
       <div class="ib-lbl"><i class="fa-solid fa-users"></i> En copie</div>
       <div class="ib-val"><?= $copies ? e(implode(', ', array_column($copies, 'nom_complet'))) : $val(null) ?></div>
     </div>
+    <?php endif; ?>
     <?php if (!empty($cour['traiteur_nom'])): ?>
     <div class="info-block">
-      <div class="ib-lbl"><i class="fa-solid fa-circle-check"></i> Traité par</div>
+      <div class="ib-lbl"><i class="fa-solid fa-circle-check"></i> <?= $entrant ? 'Traité par' : 'Validé par' ?></div>
       <div class="ib-val">
         <?= e($cour['traiteur_nom']) ?>
         <?php if (!empty($cour['date_traitement'])): ?>
@@ -348,7 +409,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
 
 <!-- Traitement -->
 <div class="trt">
-  <div class="trt-hd"><i class="fa-solid fa-route" style="color:var(--blue-500);"></i> Traitement</div>
+  <div class="trt-hd"><i class="fa-solid fa-route" style="color:var(--blue-500);"></i> <?= $entrant ? 'Traitement' : 'Validation et envoi' ?></div>
   <div class="circuit">
     <?php $i = 0; foreach ($etapes_circuit as $k => $lbl):
       $cls = $idx_etape === false ? '' : ($i < $idx_etape ? 'fait' : ($i === $idx_etape ? 'cur' : '')); ?>
@@ -356,8 +417,8 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
       <div class="pt <?= $cls ?>"><span class="dot"><?= $cls === 'fait' ? '<i class="fa-solid fa-check"></i>' : $i + 1 ?></span><?= e($lbl) ?></div>
     <?php $i++; endforeach; ?>
   </div>
-  <div class="trt-etat <?= $pilote_statut === 'SOUMIS' && $est_dg ? 'attente' : (in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true) ? 'ok' : '') ?>">
-    <i class="fa-solid <?= $pilote_statut === 'SOUMIS' ? 'fa-hourglass-half' : 'fa-circle-info' ?>" style="margin-top:3px;"></i>
+  <div class="trt-etat <?= $etat_classe ?>">
+    <i class="fa-solid <?= $etat_classe === 'attente' ? 'fa-hourglass-half' : ($etat_classe === 'ok' ? 'fa-circle-check' : 'fa-circle-info') ?>" style="margin-top:3px;"></i>
     <span><?= $etat ?></span>
   </div>
   <div class="trt-btns">
@@ -366,7 +427,26 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
         <i class="fa-solid fa-share-from-square"></i> <?= $affectations ? 'Réaffecter' : 'Affecter' ?>
       </button>
     <?php endif; ?>
-    <?php if ($est_pilote && $pilote_statut === 'A_TRAITER' && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
+    <?php if ($peut_valider_s): ?>
+      <button type="button" class="btn btn-sm btn-ok" onclick="ouvrirModal('modalValider')"><i class="fa-solid fa-check"></i> Valider pour envoi</button>
+    <?php endif; ?>
+    <?php if ($peut_renvoyer_s): ?>
+      <button type="button" class="btn btn-sm btn-warn" onclick="ouvrirModal('modalRejeter')"><i class="fa-solid fa-rotate-left"></i> Renvoyer pour correction</button>
+    <?php endif; ?>
+    <?php if ($peut_resoumettre): ?>
+      <?php if ($peut_modifier): ?>
+        <a href="form.php?id=<?= $cid ?>" class="btn btn-secondary btn-sm"><i class="fa-solid fa-pen"></i> Corriger le courrier</a>
+      <?php endif; ?>
+      <button type="button" class="btn btn-sm btn-ok" onclick="ouvrirModal('modalResoumettre')"><i class="fa-solid fa-paper-plane"></i> Soumettre à nouveau au DG</button>
+    <?php endif; ?>
+    <?php if ($peut_expedier): ?>
+      <?php if ($envoi_email): ?>
+        <button type="button" class="btn btn-primary btn-sm" onclick="ouvrirModal('modalEnvoyer')"><i class="fa-solid fa-paper-plane"></i> Envoyer au destinataire</button>
+      <?php else: ?>
+        <button type="button" class="btn btn-primary btn-sm" onclick="ouvrirModal('modalExpedier')"><i class="fa-solid fa-truck-fast"></i> Marquer comme expédié</button>
+      <?php endif; ?>
+    <?php endif; ?>
+    <?php if ($entrant && $est_pilote && $pilote_statut === 'A_TRAITER' && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
       <form method="POST" action="actions.php" style="display:inline;">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="commencer">
@@ -374,10 +454,10 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
         <button type="submit" class="btn btn-secondary btn-sm"><i class="fa-solid fa-play"></i> Commencer le traitement</button>
       </form>
     <?php endif; ?>
-    <?php if ($est_pilote && in_array($pilote_statut, ['A_TRAITER','EN_COURS'], true) && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
+    <?php if ($entrant && $est_pilote && in_array($pilote_statut, ['A_TRAITER','EN_COURS'], true) && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
       <button type="button" class="btn btn-sm btn-ok" onclick="ouvrirModal('modalSoumettre')"><i class="fa-solid fa-paper-plane"></i> Soumettre au DG</button>
     <?php endif; ?>
-    <?php if ($est_dg && $pilote_statut === 'SOUMIS'): ?>
+    <?php if ($entrant && $est_dg && $pilote_statut === 'SOUMIS'): ?>
       <button type="button" class="btn btn-sm btn-ok" onclick="ouvrirModal('modalValider')"><i class="fa-solid fa-check"></i> Valider le traitement</button>
       <button type="button" class="btn btn-sm btn-warn" onclick="ouvrirModal('modalRejeter')"><i class="fa-solid fa-rotate-left"></i> Renvoyer au pilote</button>
     <?php endif; ?>
@@ -420,7 +500,8 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
   <div class="fil">
     <?php if (empty($echanges)): ?>
       <div class="fil-vide"><i class="fa-regular fa-comments" style="font-size:1.6rem;display:block;margin-bottom:8px;opacity:.4;"></i>
-        Aucun échange pour l'instant. Le DG, l'agent pilote et les agents en copie peuvent échanger ici.</div>
+        Aucun échange pour l'instant. <?= $entrant ? 'Le DG, l\'agent pilote et les agents en copie peuvent échanger ici.'
+                                                  : 'Le DG et la personne qui a enregistré le courrier peuvent échanger ici.' ?></div>
     <?php else: ?>
     <div class="fil-list" id="filList">
       <?php
@@ -555,7 +636,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
               <?= e(ucfirst(strtolower(str_replace('_', ' ', $s['action'])))) ?>
               <?php if (!empty($s['nouveau_statut']) && $s['nouveau_statut'] !== $s['ancien_statut']): ?>
                 <span style="font-weight:500;color:var(--text-muted);">
-                  → <?= e($STATUTS[$s['nouveau_statut']]['label'] ?? $s['nouveau_statut']) ?>
+                  → <?= e(courrier_statut_info($s['nouveau_statut'], $cour['sens'])['label']) ?>
                 </span>
               <?php endif; ?>
             </div>
@@ -700,7 +781,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
   <div class="modal" style="max-width:480px;">
     <div class="modal-header">
       <i class="fa-solid fa-check" style="color:#16a34a;"></i>
-      <h3>Valider le traitement</h3>
+      <h3><?= $entrant ? 'Valider le traitement' : 'Valider le courrier pour envoi' ?></h3>
       <button class="modal-close" type="button" onclick="fermerModal('modalValider')"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <form method="POST" action="actions.php">
@@ -708,7 +789,13 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
       <input type="hidden" name="action" value="valider">
       <input type="hidden" name="courrier_id" value="<?= $cid ?>">
       <div class="modal-body">
-        <p style="font-size:.84rem;margin:0 0 12px;">Le courrier passera au statut <strong>« Traité »</strong> et l'agent pilote sera prévenu.</p>
+        <?php if ($entrant): ?>
+          <p style="font-size:.84rem;margin:0 0 12px;">Le courrier passera au statut <strong>« Traité »</strong> et l'agent pilote sera prévenu.</p>
+        <?php else: ?>
+          <p style="font-size:.84rem;margin:0 0 12px;">Vous approuvez <?= count($cour['documents']) ? 'la lettre et ses ' . count($cour['documents']) . ' pièce(s) jointe(s)' : 'ce courrier' ?>. Le courrier passera au statut <strong>« Validé »</strong> et
+            <?= $envoi_email ? 'pourra être envoyé par email à <strong>' . e($cour['correspondant_email'] ?: '—') . '</strong>.' : 'pourra être expédié.' ?>
+            Il ne sera plus modifiable.</p>
+        <?php endif; ?>
         <label class="form-label">Commentaire <span style="font-weight:400;color:var(--text-muted);">(facultatif)</span></label>
         <textarea name="message" class="form-control" rows="3" maxlength="2000" placeholder="Félicitations, remarques…"></textarea>
       </div>
@@ -724,7 +811,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
   <div class="modal" style="max-width:480px;">
     <div class="modal-header">
       <i class="fa-solid fa-rotate-left" style="color:#c2410c;"></i>
-      <h3>Renvoyer au pilote</h3>
+      <h3><?= $entrant ? 'Renvoyer au pilote' : 'Renvoyer pour correction' ?></h3>
       <button class="modal-close" type="button" onclick="fermerModal('modalRejeter')"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <form method="POST" action="actions.php">
@@ -732,9 +819,11 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
       <input type="hidden" name="action" value="rejeter">
       <input type="hidden" name="courrier_id" value="<?= $cid ?>">
       <div class="modal-body">
-        <label class="form-label">Ce qui doit être revu <span class="req">*</span></label>
-        <textarea name="motif" class="form-control" rows="4" required maxlength="2000" placeholder="Précisez les compléments attendus…"></textarea>
-        <div class="hint">Le traitement repasse « en cours » et l'agent pilote est prévenu.</div>
+        <label class="form-label"><?= $entrant ? 'Ce qui doit être revu' : 'Corrections attendues' ?> <span class="req">*</span></label>
+        <textarea name="motif" class="form-control" rows="4" required maxlength="2000"
+                  placeholder="<?= $entrant ? 'Précisez les compléments attendus…' : 'Ex. : corriger la date, joindre l\'annexe signée…' ?>"></textarea>
+        <div class="hint"><?= $entrant ? 'Le traitement repasse « en cours » et l\'agent pilote est prévenu.'
+                                       : 'Le courrier repasse « À corriger » et ' . e($cour['enregistreur_nom'] ?: 'la personne qui l\'a enregistré') . ' est prévenu(e).' ?></div>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="fermerModal('modalRejeter')">Annuler</button>
@@ -763,6 +852,131 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" onclick="fermerModal('modalCloturer')">Annuler</button>
         <button type="submit" class="btn btn-primary"><i class="fa-solid fa-flag-checkered"></i> Clôturer</button>
+      </div>
+    </form>
+  </div>
+</div>
+<?php endif; ?>
+
+<?php if ($peut_expedier && $envoi_email):
+  $exp_adresse = defined('MAIL_INFO_ADDRESS') && MAIL_INFO_ADDRESS !== '' ? MAIL_INFO_ADDRESS : (defined('MAIL_FROM') ? MAIL_FROM : '');
+  $msg_defaut  = "Veuillez trouver ci-joint notre courrier référencé " . $cour['reference'] . ", relatif à : " . $cour['objet'] . ".\n\n"
+               . "Nous restons à votre disposition pour tout complément d'information."; ?>
+<!-- Modal envoi par email (sortant validé) -->
+<div class="modal-overlay" id="modalEnvoyer">
+  <div class="modal" style="max-width:600px;">
+    <div class="modal-header">
+      <i class="fa-solid fa-paper-plane" style="color:var(--blue-500);"></i>
+      <h3>Envoyer au destinataire</h3>
+      <button class="modal-close" type="button" onclick="fermerModal('modalEnvoyer')"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <form method="POST" action="actions.php" id="formEnvoyer">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="envoyer">
+      <input type="hidden" name="courrier_id" value="<?= $cid ?>">
+      <div class="modal-body">
+        <div class="row-2">
+          <div class="form-group">
+            <label class="form-label">De</label>
+            <input type="text" class="form-control" value="<?= e($exp_adresse) ?>" disabled>
+          </div>
+          <div class="form-group">
+            <label class="form-label">À <span class="req">*</span></label>
+            <input type="email" name="destinataire" class="form-control" required value="<?= e($cour['correspondant_email'] ?? '') ?>">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Objet de l'email <span class="req">*</span></label>
+          <input type="text" name="sujet" class="form-control" required maxlength="250" value="<?= e($cour['objet'] . ' — Réf. ' . $cour['reference']) ?>">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Message <span class="req">*</span></label>
+          <textarea name="message" class="form-control" rows="5" required maxlength="5000"><?= e($msg_defaut) ?></textarea>
+          <div class="hint">Précédé de « Bonjour <?= e($cour['correspondant_nom'] ?: 'Madame, Monsieur') ?>, » et suivi de la référence du courrier et de la signature du Secrétariat de Direction.</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Pièces jointes</label>
+          <?php if (empty($cour['documents'])): ?>
+            <div class="trt-etat attente" style="margin:0;"><i class="fa-solid fa-triangle-exclamation" style="margin-top:3px;"></i>
+              <span>Aucun document sur la fiche : l'email partira sans la lettre.</span></div>
+          <?php else: ?>
+            <div class="pj-list">
+              <?php foreach ($cour['documents'] as $d): ?>
+                <label class="pj-item">
+                  <input type="checkbox" name="docs[]" value="<?= (int)$d['id'] ?>" data-taille="<?= (int)$d['taille_fichier'] ?>" checked>
+                  <i class="fa-solid fa-paperclip"></i>
+                  <span class="pj-nom"><?= e($d['nom_original']) ?></span>
+                  <span class="pj-taille"><?= $d['taille_fichier'] ? round($d['taille_fichier'] / 1024, 1) . ' Ko' : '' ?></span>
+                </label>
+              <?php endforeach; ?>
+            </div>
+            <div class="hint" id="pjTotal"></div>
+          <?php endif; ?>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="fermerModal('modalEnvoyer')">Annuler</button>
+        <button type="submit" class="btn btn-primary" id="btnEnvoyer"><i class="fa-solid fa-paper-plane"></i> Envoyer</button>
+      </div>
+    </form>
+  </div>
+</div>
+<?php endif; ?>
+
+<?php if ($peut_expedier && !$envoi_email): ?>
+<!-- Modal expédition papier (sortant validé) -->
+<div class="modal-overlay" id="modalExpedier">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-header">
+      <i class="fa-solid fa-truck-fast" style="color:var(--blue-500);"></i>
+      <h3>Marquer comme expédié</h3>
+      <button class="modal-close" type="button" onclick="fermerModal('modalExpedier')"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <form method="POST" action="actions.php">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="expedier">
+      <input type="hidden" name="courrier_id" value="<?= $cid ?>">
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Date d'expédition <span class="req">*</span></label>
+          <input type="date" name="date_expedition" class="form-control" required max="<?= date('Y-m-d') ?>" value="<?= date('Y-m-d') ?>">
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Précision <span style="font-weight:400;color:var(--text-muted);">(facultatif)</span></label>
+          <input type="text" name="commentaire" class="form-control" maxlength="250" placeholder="Ex. : remis en main propre, envoyé par la poste, coursier…">
+          <div class="hint">Le courrier passera au statut « Envoyé ».</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="fermerModal('modalExpedier')">Annuler</button>
+        <button type="submit" class="btn btn-primary"><i class="fa-solid fa-truck-fast"></i> Confirmer l'expédition</button>
+      </div>
+    </form>
+  </div>
+</div>
+<?php endif; ?>
+
+<?php if ($peut_resoumettre): ?>
+<!-- Modal nouvelle soumission après correction -->
+<div class="modal-overlay" id="modalResoumettre">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-header">
+      <i class="fa-solid fa-paper-plane" style="color:#16a34a;"></i>
+      <h3>Soumettre à nouveau au DG</h3>
+      <button class="modal-close" type="button" onclick="fermerModal('modalResoumettre')"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <form method="POST" action="actions.php">
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="resoumettre">
+      <input type="hidden" name="courrier_id" value="<?= $cid ?>">
+      <div class="modal-body">
+        <label class="form-label">Corrections apportées <span style="font-weight:400;color:var(--text-muted);">(facultatif)</span></label>
+        <textarea name="message" class="form-control" rows="3" maxlength="2000" placeholder="Ex. : date corrigée, annexe signée ajoutée…"></textarea>
+        <div class="hint">Le DG est prévenu pour valider à nouveau le courrier.</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="fermerModal('modalResoumettre')">Annuler</button>
+        <button type="submit" class="btn btn-ok"><i class="fa-solid fa-paper-plane"></i> Soumettre</button>
       </div>
     </form>
   </div>
@@ -804,6 +1018,23 @@ function allerFil() {
   if (<?= $focus_fil ? 'true' : 'false' ?> && liste) {
     const dernier = liste.lastElementChild;
     if (dernier) { dernier.classList.add("focus"); document.getElementById("tab-echanges").scrollIntoView({behavior: "smooth", block: "start"}); }
+  }
+
+  // Envoi par email : poids total des pièces jointes (20 Mo max) et pas de double envoi
+  const fEnv = document.getElementById("formEnvoyer");
+  if (fEnv) {
+    const total = document.getElementById("pjTotal"), btn = document.getElementById("btnEnvoyer");
+    const majTotal = () => {
+      if (!total) return;
+      const cases = [...fEnv.querySelectorAll('input[name="docs[]"]:checked')];
+      const mo = cases.reduce((s, c) => s + (+c.dataset.taille || 0), 0) / 1048576;
+      total.textContent = cases.length + " pièce(s) jointe(s) — " + mo.toFixed(1).replace(".", ",") + " Mo" + (mo > 20 ? " : au-delà de 20 Mo, l'email sera refusé." : "");
+      total.classList.toggle("trop", mo > 20);
+      btn.disabled = mo > 20;
+    };
+    fEnv.addEventListener("change", majTotal);
+    majTotal();
+    fEnv.addEventListener("submit", () => { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Envoi en cours…'; });
   }
 
   // Affectation : responsable du service proposé comme pilote, pilote exclu des copies

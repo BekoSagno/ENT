@@ -21,6 +21,11 @@ if ($cid && (!$cour || !courrier_peut_voir($cour))) {
     header('Location: index.php');
     exit;
 }
+if ($cour && courrier_sortant_verrouille($cour)) {
+    set_flash('error', 'Ce courrier sortant a été validé par le DG : il ne peut plus être modifié. Le DG peut le renvoyer en correction avant l\'envoi.');
+    header('Location: voir.php?id=' . $cid);
+    exit;
+}
 
 $sens    = $cour['sens'] ?? (($_GET['sens'] ?? '') === 'SORTANT' ? 'SORTANT' : 'ENTRANT');
 $entrant = $sens === 'ENTRANT';
@@ -207,6 +212,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && (int)($_SERVER['CO
                 require_once __DIR__ . '/../../includes/mailer_courriers.php';
                 courrier_notifier_nouveaux_entrants([array_merge($data, ['id' => $id_cible, 'reference' => $res['reference']])]);
             }
+            // Sortant : validation du DG obligatoire avant l'envoi
+            if ($mode === 'creer' && !$entrant) {
+                require_once __DIR__ . '/../../includes/mailer_courriers.php';
+                courrier_notifier_sortant_a_valider(array_merge($data, ['id' => $id_cible, 'reference' => $res['reference']]));
+                set_flash('info', 'Le DG est prévenu : le courrier pourra être envoyé au destinataire dès qu\'il l\'aura validé.');
+            }
+            if ($mode === 'modifier' && !$entrant && ($cour['statut'] ?? '') === 'EN_TRAITEMENT') {
+                set_flash('info', 'Une fois les corrections terminées, cliquez sur « Soumettre à nouveau au DG » sur la fiche du courrier.');
+            }
 
             header('Location: voir.php?id=' . $id_cible);
             exit;
@@ -345,6 +359,9 @@ $bloc_canal = function () use ($CANAUX, $CANAL_DESC, $S, $cour) {
 .acc-box input{margin-top:3px;width:16px;height:16px;accent-color:var(--sens);}
 .acc-box strong{font-size:.84rem;display:block;}
 .acc-box small{font-size:.72rem;color:var(--text-muted);}
+.circuit-info{display:flex;gap:12px;align-items:flex-start;background:var(--sens-bg);border-radius:12px;padding:12px 14px;margin-top:4px;font-size:.8rem;color:var(--text);}
+.circuit-info i{color:var(--sens);margin-top:3px;}
+.circuit-info strong{display:block;font-size:.84rem;margin-bottom:2px;}
 
 .wz-actions{position:sticky;bottom:0;z-index:50;background:rgba(255,255,255,.96);backdrop-filter:blur(8px);border-top:1px solid var(--border);padding:13px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
 .wz-actions .sp{flex:1;}
@@ -552,6 +569,15 @@ $bloc_canal = function () use ($CANAUX, $CANAL_DESC, $S, $cour) {
             <small id="accTxt">Un email confirmant la bonne réception, avec la référence du courrier, sera envoyé depuis l'adresse institutionnelle.</small>
           </span>
         </label>
+      <?php elseif ($mode === 'creer'): ?>
+        <div class="circuit-info">
+          <i class="fa-solid fa-route"></i>
+          <span>
+            <strong>Validation du DG avant l'envoi</strong>
+            Le DG est prévenu dès l'enregistrement. Une fois le courrier validé, il pourra être envoyé au destinataire depuis sa fiche
+            (par email depuis l'adresse institutionnelle, ou marqué « expédié » pour un envoi papier).
+          </span>
+        </div>
       <?php endif; ?>
     </div>
   </section>

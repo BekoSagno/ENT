@@ -158,8 +158,10 @@ include __DIR__ . '/../../views/layout/header.php';
     <label>Statut</label>
     <select id="fstatut" class="form-control">
       <option value="">Tous</option>
-      <?php foreach ($STATUTS as $k=>$v): ?>
-        <option value="<?= $k ?>" <?= $f['statut']===$k?'selected':'' ?>><?= $v['label'] ?></option>
+      <?php foreach ($STATUTS as $k=>$v):
+        if ($f['sens'] === 'SORTANT' && $k === 'AFFECTE') continue;
+        $lbl = $f['sens'] === 'SORTANT' ? courrier_statut_info($k, 'SORTANT')['label'] : $v['label']; ?>
+        <option value="<?= $k ?>" <?= $f['statut']===$k?'selected':'' ?>><?= $lbl ?></option>
       <?php endforeach; ?>
     </select>
   </div>
@@ -232,11 +234,11 @@ include __DIR__ . '/../../views/layout/header.php';
   </thead>
   <tbody>
   <?php foreach ($courriers as $c):
-    $st = $STATUTS[$c['statut']] ?? $STATUTS['RECU'];
+    $st = courrier_statut_info($c['statut'], $c['sens']);
     $pr = $PRIOS[$c['priorite']] ?? $PRIOS['NORMALE'];
     $cn = $CANAUX[$c['canal']] ?? $CANAUX['AUTRE'];
     $en_retard = !empty($c['date_echeance']) && $c['date_echeance'] < date('Y-m-d')
-                 && !in_array($c['statut'], ['TRAITE','CLOTURE','ARCHIVE']);
+                 && !in_array($c['statut'], courrier_statuts_termines($c['sens']), true);
   ?>
     <tr>
       <td>
@@ -294,7 +296,7 @@ include __DIR__ . '/../../views/layout/header.php';
       <td>
         <div class="act-btns">
           <a href="voir.php?id=<?= $c['id'] ?>" class="btn btn-secondary btn-sm btn-icon" title="Voir"><i class="fa-solid fa-eye"></i></a>
-          <?php if ($peut_modifier): ?>
+          <?php if ($peut_modifier && !courrier_sortant_verrouille($c)): ?>
             <a href="form.php?id=<?= $c['id'] ?>" class="btn btn-secondary btn-sm btn-icon" title="Modifier"><i class="fa-solid fa-pen"></i></a>
           <?php endif; ?>
           <?php if ($peut_supprimer): ?>

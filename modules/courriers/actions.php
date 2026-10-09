@@ -29,6 +29,14 @@ $fil     = $retour . '&focus=echanges';
 $flash   = fn(array $res, string $ok) => set_flash($res['succes'] ? 'success' : 'error', $res['succes'] ? $ok : ($res['message'] ?? 'Erreur.'));
 $mailer  = function () { require_once APP_ROOT . '/includes/mailer_courriers.php'; };
 $courant = fn() => courrier_charger($cid) ?: $cour;
+$sortant = $cour['sens'] === 'SORTANT';
+$utilisateur = function (int $id): ?array {
+    if ($id <= 0) return null;
+    $s = get_db()->prepare('SELECT id, prenoms, nom, email FROM utilisateurs WHERE id=?');
+    $s->execute([$id]);
+    return $s->fetch() ?: null;
+};
+$enregistreur = fn() => array_filter([$utilisateur((int)($cour['enregistre_par'] ?? 0))]);
 
 switch ($action) {
 
@@ -43,6 +51,7 @@ switch ($action) {
     // ── Supprimer un document ──
     case 'supprimer_doc':
         exiger_permission('COURRIERS', 'MODIFIER');
+        if (courrier_sortant_verrouille($cour)) { set_flash('error', 'Ce courrier a été validé par le DG : ses documents ne peuvent plus être modifiés.'); break; }
         $res = courrier_doc_supprimer((int)($_POST['doc_id'] ?? 0));
         $flash($res, 'Document supprimé.');
         break;
@@ -50,6 +59,7 @@ switch ($action) {
     // ── Affecter : DG / super admin uniquement ──
     case 'affecter':
         if (!courrier_est_dg()) { set_flash('error', 'Seuls le DG et le super administrateur peuvent affecter un courrier.'); break; }
+        if ($sortant) { set_flash('error', 'Un courrier sortant ne s\'affecte pas : il est validé par le DG puis envoyé.'); break; }
         $copies = array_map('intval', (array)($_POST['copies'] ?? []));
         $res = courrier_affecter_equipe($cid, (int)($_POST['service_id'] ?? 0) ?: null, (int)($_POST['pilote'] ?? 0),
             $copies, clean($_POST['date_limite'] ?? '') ?: null, trim($_POST['instruction'] ?? ''));
@@ -113,9 +123,20 @@ switch ($action) {
         $retour = $fil;
         break;
 
-    // ── DG : valider le traitement ──
+    // ── DG : valider un courrier sortant avant envoi ──
     case 'valider':
         $msg = trim($_POST['message'] ?? '');
+        if ($sortant) {
+            $res = courrier_sortant_valider($cid, $msg);
+            $flash($res, 'Courrier validé : il peut maintenant être envoyé au destinataire.');
+            if ($res['succes']) {
+                $mailer();
+                courrier_diffuser($enregistreur(), $courant(), 'Courrier sortant validé',
+                    'Le DG a validé le courrier sortant. Vous pouvez maintenant l\'envoyer au destinataire depuis sa fiche.', $msg);
+            }
+            break;
+        }
+        // DG : valider le traitement du pilote
         $res = courrier_valider($cid, $msg);
         $flash($res, 'Traitement validé : le courrier est marqué « Traité ».');
         if ($res['succes']) {
@@ -128,9 +149,20 @@ switch ($action) {
         $retour = $fil;
         break;
 
-    // ── DG : renvoyer au pilote ──
+    // ── DG : renvoyer un sortant en correction, ou un traitement au pilote ──
     case 'rejeter':
         $motif = trim($_POST['motif'] ?? '');
+        if ($sortant) {
+            $res = courrier_sortant_renvoyer($cid, $motif);
+            $flash($res, 'Courrier renvoyé pour correction.');
+            if ($res['succes']) {
+                $mailer();
+                courrier_diffuser($enregistreur(), $courant(), 'Courrier sortant à corriger',
+                    'Le DG demande des corrections avant l\'envoi. Modifiez le courrier puis soumettez-le à nouveau.', $motif);
+            }
+            $retour = $fil;
+            break;
+        }
         $res = courrier_rejeter($cid, $motif);
         $flash($res, 'Traitement renvoyé à l\'agent pilote.');
         if ($res['succes']) {
@@ -143,6 +175,7 @@ switch ($action) {
 
     // ── DG : clôturer ──
     case 'cloturer':
+        if ($sortant) { set_flash('error', 'Un courrier sortant se termine par son envoi au destinataire.'); break; }
         $com = trim($_POST['commentaire'] ?? '');
         $res = courrier_cloturer($cid, $com);
         $flash($res, 'Courrier clôturé.');
@@ -155,14 +188,79 @@ switch ($action) {
     // ── Archiver (DG, ou secrétariat avec la permission VALIDER) ──
     case 'archiver':
         if (!courrier_est_dg() && !a_permission('COURRIERS', 'VALIDER')) { set_flash('error', 'Action non autorisée.'); break; }
+        if ($sortant && $cour['statut'] !== 'CLOTURE') { set_flash('error', 'Un courrier sortant ne peut être archivé qu\'après son envoi.'); break; }
         if (!in_array($cour['statut'], ['TRAITE', 'CLOTURE'], true)) { set_flash('error', 'Seul un courrier traité ou clôturé peut être archivé.'); break; }
         $res = courrier_changer_statut($cid, 'ARCHIVE', 'Courrier archivé');
         $flash($res, 'Courrier archivé.');
         break;
 
-    // ── Fil d'échanges : DG, super admin et agents affectés ──
+    // ── Sortant corrigé : soumis à nouveau au DG ──
+    case 'resoumettre':
+        $msg = trim($_POST['message'] ?? '');
+        $res = courrier_sortant_resoumettre($cour, $msg);
+        $flash($res, 'Courrier soumis à nouveau au DG pour validation.');
+        if ($res['succes']) {
+            $mailer();
+            courrier_notifier_sortant_a_valider($courant(), true, $msg);
+        }
+        $retour = $fil;
+        break;
+
+    // ── Sortant validé, canal Email : envoi au destinataire depuis info@ ──
+    case 'envoyer':
+        if (!courrier_peut_expedier($cour)) { set_flash('error', 'Ce courrier doit être validé par le DG avant l\'envoi, par le DG ou la personne qui l\'a enregistré.'); break; }
+        $to    = strtolower(trim($_POST['destinataire'] ?? ''));
+        $sujet = clean($_POST['sujet'] ?? '');
+        $corps = trim($_POST['message'] ?? '');
+        if (!filter_var($to, FILTER_VALIDATE_EMAIL)) { set_flash('error', 'L\'adresse email du destinataire est invalide.'); break; }
+        if ($sujet === '' || $corps === '')         { set_flash('error', 'L\'objet et le message de l\'email sont obligatoires.'); break; }
+
+        $choisis = array_map('intval', (array)($_POST['docs'] ?? []));
+        $fichiers = [];
+        $poids = 0;
+        foreach ($cour['documents'] as $d) {
+            if (!in_array((int)$d['id'], $choisis, true)) continue;
+            $abs = APP_ROOT . '/' . ltrim($d['chemin_fichier'], '/');
+            if (!is_file($abs)) { set_flash('error', 'Pièce jointe introuvable sur le serveur : « ' . $d['nom_original'] . ' ».'); break 2; }
+            $poids += filesize($abs);
+            $fichiers[] = ['chemin' => $abs, 'nom' => $d['nom_original']];
+        }
+        if ($poids > 20 * 1024 * 1024) { set_flash('error', 'Les pièces jointes dépassent 20 Mo au total : décochez-en une partie.'); break; }
+
+        $mailer();
+        $env = courrier_envoyer_reponse($cour, $to, $sujet, $corps, $fichiers);
+        if (!$env['succes']) { set_flash('error', 'Le courrier n\'a pas été envoyé : ' . $env['message']); break; }
+
+        $res = courrier_sortant_expedier($cour, 'EMAIL',
+            'Envoyé par email à ' . $to . ' depuis ' . (defined('MAIL_INFO_ADDRESS') && MAIL_INFO_ADDRESS !== '' ? MAIL_INFO_ADDRESS : MAIL_FROM)
+            . ' — ' . count($fichiers) . ' pièce' . (count($fichiers) > 1 ? 's jointes' : ' jointe') . '. Objet : ' . $sujet,
+            $env['message_id'] ?? null);
+        $flash($res, 'Courrier envoyé à ' . $to . '.');
+        if ($res['succes']) {
+            courrier_diffuser(array_merge(courrier_utilisateurs_dg(), $enregistreur()), $courant(),
+                'Courrier sortant envoyé', 'Le courrier a été envoyé par email à ' . $to . '.', '', false);
+        }
+        break;
+
+    // ── Sortant validé, envoi papier : lettre remise ou postée ──
+    case 'expedier':
+        if (!courrier_peut_expedier($cour)) { set_flash('error', 'Ce courrier doit être validé par le DG avant l\'expédition, par le DG ou la personne qui l\'a enregistré.'); break; }
+        $date = clean($_POST['date_expedition'] ?? '');
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > date('Y-m-d')) { set_flash('error', 'La date d\'expédition est invalide (elle ne peut pas être dans le futur).'); break; }
+        $comment = clean($_POST['commentaire'] ?? '');
+        $res = courrier_sortant_expedier($cour, 'PHYSIQUE',
+            'Expédié le ' . date('d/m/Y', strtotime($date)) . ($comment !== '' ? ' — ' . $comment : ''));
+        $flash($res, 'Courrier marqué comme expédié.');
+        if ($res['succes']) {
+            $mailer();
+            courrier_diffuser(array_merge(courrier_utilisateurs_dg(), $enregistreur()), $courant(),
+                'Courrier sortant expédié', 'Le courrier a été expédié le ' . date('d/m/Y', strtotime($date)) . '.', $comment, false);
+        }
+        break;
+
+    // ── Fil d'échanges : DG, agents affectés et enregistreur d'un sortant ──
     case 'message':
-        if (!courrier_est_dg() && !courrier_participation($cid, $uid)) { set_flash('error', 'Seuls le DG et les agents affectés peuvent écrire ici.'); break; }
+        if (!courrier_peut_ecrire($cour)) { set_flash('error', 'Seuls le DG et les personnes concernées peuvent écrire ici.'); break; }
         $msg = trim($_POST['message'] ?? '');
         $res = courrier_echange_ajouter($cid, $msg);
         if (!$res['succes']) { set_flash('error', $res['message']); }
@@ -170,8 +268,8 @@ switch ($action) {
             $mailer();
             $dest = courrier_affectations($cid);
             $p = courrier_pilote($cid);
-            $s = get_db()->prepare('SELECT id, prenoms, nom, email FROM utilisateurs WHERE id=?');
-            if (!empty($p['affecte_par'])) { $s->execute([(int)$p['affecte_par']]); if ($u = $s->fetch()) $dest[] = $u; }
+            if ($sortant) { $dest = array_merge($dest, courrier_utilisateurs_dg(), $enregistreur()); }
+            elseif (!empty($p['affecte_par']) && ($u = $utilisateur((int)$p['affecte_par']))) { $dest[] = $u; }
             else { $dest = array_merge($dest, courrier_utilisateurs_dg()); }
             $moi = user_courant();
             courrier_diffuser($dest, $courant(), 'Nouveau message',

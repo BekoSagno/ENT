@@ -375,6 +375,16 @@ function courrier_notifier_nouveaux_entrants(array $courriers): void {
     }
 }
 
+// Courrier sortant enregistré (ou corrigé) → le DG est prévenu pour le valider avant envoi
+function courrier_notifier_sortant_a_valider(array $c, bool $apres_correction = false, string $message = ''): void {
+    $dest = $c['correspondant_organisation'] ?: ($c['correspondant_nom'] ?: 'destinataire non précisé');
+    courrier_diffuser(courrier_utilisateurs_dg(), $c,
+        $apres_correction ? 'Courrier sortant corrigé à valider' : 'Courrier sortant à valider',
+        ($apres_correction ? 'Le courrier sortant a été corrigé' : 'Un courrier sortant vient d\'être enregistré')
+        . ' pour ' . $dest . ' : « ' . ($c['objet'] ?? '') . ' ». Il attend votre validation avant envoi.',
+        $message);
+}
+
 // Template générique : un événement sur un courrier (soumission, validation, message…)
 function courrier_template_evenement(array $user, array $courrier, string $titre, string $intro, string $message = '', string $url = ''): string {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES | ENT_HTML5, 'UTF-8');
