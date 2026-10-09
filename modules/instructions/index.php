@@ -9,6 +9,16 @@ require_once __DIR__ . '/../../models/instruction.php';
 session_demarrer();
 exiger_permission('INSTRUCTIONS', 'VOIR');
 
+// Clic sur le badge du menu : ouvrir directement l'instruction et la tâche concernées
+if (!empty($_GET['voir_alerte'])) {
+    $notif = instr_notif_premiere_non_lue((int)user_id());
+    if ($notif) {
+        $tid = (int)($notif['tache_id'] ?? 0);
+        redirect('/modules/instructions/voir.php?id=' . (int)$notif['instruction_id']
+            . ($tid ? '&focus=' . $tid . '#t' . $tid : ''));
+    }
+}
+
 $peut_emettre = _instr_peut_emettre();
 
 $f = [

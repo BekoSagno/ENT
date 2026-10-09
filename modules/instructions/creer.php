@@ -29,25 +29,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
         if ($res['succes']) { set_flash('success','Instruction modifiée.'); redirect('/modules/instructions/voir.php?id='.$id); }
         set_flash('error', $res['message'] ?? 'Erreur.');
     } else {
+        // Une tâche par responsable choisi, toutes avec le même objet, délai et priorité
+        $responsables = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['responsables'] ?? [])))));
+        $delai_valeur = max(1, (int)($_POST['delai_valeur'] ?? 1));
+        $delai_unite  = clean($_POST['delai_unite'] ?? 'HEURE');
         $data = [
             'objet'       => clean($_POST['objet'] ?? ''),
             'description' => trim($_POST['description'] ?? ''),
             'priorite'    => clean($_POST['priorite'] ?? 'NORMALE'),
-            'taches'      => $_POST['taches'] ?? [],
+            'taches'      => array_map(fn($uid) => [
+                'titre'        => clean($_POST['objet'] ?? ''),
+                'assigne_a'    => $uid,
+                'delai_valeur' => $delai_valeur,
+                'delai_unite'  => $delai_unite,
+                'priorite'     => clean($_POST['priorite'] ?? 'NORMALE'),
+            ], $responsables),
         ];
-        $res = instruction_creer($data);
+        $res = $responsables
+            ? instruction_creer($data)
+            : ['succes'=>false, 'message'=>'Choisissez au moins un responsable.'];
         if ($res['succes']) {
-            if (MAIL_ENABLED) notifier_instruction($res['instruction_id']);
-            set_flash('success', 'Instruction émise et responsables notifiés.');
+            $n = instr_notifier_nouvelles_taches($res['instruction_id']);
+            $canal = MAIL_ENABLED ? ' dans l\'ENT et par e-mail' : ' dans l\'ENT';
+            $msg = 'Instruction émise' . ($n['notifies'] ? ' : ' . $n['notifies'] . ' responsable(s) notifié(s)' . $canal : '') . '.';
+            if ($n['echecs'] > 0) $msg .= ' ' . $n['echecs'] . ' e-mail(s) n\'ont pas pu être envoyés.';
+            set_flash('success', $msg);
             redirect('/modules/instructions/voir.php?id=' . $res['instruction_id']);
         }
         set_flash('error', $res['message'] ?? 'Erreur.');
         $old_objet = $data['objet']; $old_desc = $data['description']; $old_prio = $data['priorite'];
+        $old_resp  = $responsables; $old_delval = $delai_valeur; $old_delunit = $delai_unite;
     }
 }
 
 $users = instr_liste_users();
 $prio_sel = $instr['priorite'] ?? ($old_prio ?? 'NORMALE');
+$resp_sel = $old_resp ?? [];
 
 $page_titre      = $mode==='creer' ? 'Nouvelle instruction' : 'Modifier l\'instruction';
 $page_breadcrumb = 'Instructions';
@@ -55,23 +72,39 @@ $module_actif    = 'INSTRUCTIONS';
 include __DIR__ . '/../../views/layout/header.php';
 ?>
 <style>
-.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px 26px;max-width:980px;}
-.form-row{margin-bottom:18px;} .lbl{display:block;font-size:.78rem;font-weight:700;color:var(--text);margin-bottom:6px;}
-.hint{font-size:.72rem;color:var(--text-muted);margin-top:4px;} .req{color:#dc2626;}
+.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px 26px;max-width:820px;}
+.lbl{display:block;font-size:.78rem;font-weight:700;color:var(--text);margin-bottom:6px;}
+.hint{font-size:.72rem;color:var(--text-muted);margin-top:5px;} .req{color:#dc2626;}
+.opt{font-weight:400;color:var(--text-muted);}
 .prio-pills{display:flex;gap:8px;flex-wrap:wrap;}
-.prio-pills label{cursor:pointer;padding:7px 16px;border-radius:20px;font-size:.78rem;font-weight:700;border:1.5px solid transparent;}
+.prio-pills label{cursor:pointer;padding:7px 16px;border-radius:20px;font-size:.78rem;font-weight:700;border:1.5px solid transparent;transition:border-color .15s;}
 .prio-pills input{display:none;}
-.seg{display:inline-flex;border:1.5px solid var(--border);border-radius:10px;overflow:hidden;}
-.seg label{padding:9px 18px;font-size:.82rem;font-weight:700;cursor:pointer;color:var(--text-muted);}
-.seg input{display:none;} .seg input:checked+label{background:var(--blue-600);color:#fff;}
-.task-row{border:1.5px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px;background:var(--bg);position:relative;}
-.task-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
-.task-num{font-size:.74rem;font-weight:800;color:var(--blue-700);background:var(--blue-100);padding:3px 11px;border-radius:20px;}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;} .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;}
-.delai-mini{display:flex;gap:8px;} .delai-mini input{max-width:90px;}
-.dep-zone{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);}
-.btn-del-task{background:none;border:none;color:#dc2626;cursor:pointer;font-size:.9rem;}
-@media(max-width:700px){.grid2,.grid3{grid-template-columns:1fr;}}
+.row-2{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;}
+.delai-mini{display:flex;gap:8px;} .delai-mini input{width:80px;flex:0 0 80px;} .delai-mini select{flex:1;}
+
+.resp-picker{position:relative;}
+.resp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+.resp-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px 4px 10px;background:var(--blue-50);border:1px solid var(--blue-200);border-radius:999px;font-size:.78rem;font-weight:600;color:var(--blue-900);}
+.resp-chip button{border:0;background:transparent;color:var(--text-muted);cursor:pointer;padding:0 2px;line-height:1;font-size:.9rem;}
+.resp-chip button:hover{color:#dc2626;}
+.resp-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;text-align:left;cursor:pointer;background:#fff;}
+.resp-toggle-label{color:var(--text-muted);font-weight:500;}
+.resp-toggle.has-sel .resp-toggle-label{color:var(--text);font-weight:600;}
+.resp-toggle .fa-chevron-down{transition:transform .15s;color:var(--text-muted);font-size:.75rem;}
+.resp-toggle[aria-expanded="true"] .fa-chevron-down{transform:rotate(180deg);}
+.resp-dropdown{position:absolute;left:0;right:0;z-index:40;margin-top:4px;border:1px solid var(--border);border-radius:10px;background:var(--surface,#fff);box-shadow:0 10px 28px rgba(15,23,42,.12);overflow:hidden;}
+.resp-search{border:0;border-bottom:1px solid var(--border);border-radius:0;box-shadow:none;}
+.resp-search:focus{outline:none;box-shadow:none;}
+.resp-list{max-height:240px;overflow:auto;padding:4px 0;}
+.resp-item{display:flex;align-items:flex-start;gap:10px;padding:9px 12px;margin:0;cursor:pointer;font-weight:400;border-bottom:1px solid var(--border);}
+.resp-item:last-child{border-bottom:0;}
+.resp-item:hover{background:var(--blue-50);}
+.resp-item input{margin-top:3px;flex-shrink:0;}
+.resp-item-text{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.resp-name{font-size:.86rem;font-weight:600;color:var(--text);}
+.resp-fonc{font-size:.74rem;color:var(--text-muted);}
+.resp-empty{padding:12px;margin:0;font-size:.8rem;color:var(--text-muted);text-align:center;}
+@media(max-width:700px){.row-2{grid-template-columns:1fr;}}
 </style>
 
 <a href="<?= $mode==='modifier' ? 'voir.php?id='.$id : 'index.php' ?>" class="btn btn-secondary btn-sm" style="margin-bottom:16px;">
@@ -89,20 +122,71 @@ include __DIR__ . '/../../views/layout/header.php';
   </div>
 
   <div class="form-group">
-    <label class="lbl">Contexte / précisions <span style="font-weight:400;color:var(--text-muted);">(facultatif)</span></label>
+    <label class="lbl">Description <span class="opt">(facultatif)</span></label>
     <textarea name="description" class="form-control" rows="3"
-              placeholder="Informations générales communes à toutes les tâches…"><?= e($instr['description'] ?? ($old_desc ?? '')) ?></textarea>
+              placeholder="Ce qui est attendu, contexte, précisions…"><?= e($instr['description'] ?? ($old_desc ?? '')) ?></textarea>
   </div>
 
+  <?php if ($mode === 'creer'): ?>
   <div class="form-group">
-    <label class="lbl">Priorité par défaut</label>
-    <div class="prio-pills">
-      <?php $prios = ['FAIBLE'=>['#f3f4f6','#6b7280'],'NORMALE'=>['#dbeafe','#1e40af'],'HAUTE'=>['#ffedd5','#9a3412'],'CRITIQUE'=>['#fee2e2','#991b1b']];
-      foreach ($prios as $k=>$c): ?>
-        <label style="background:<?= $c[0] ?>;color:<?= $c[1] ?>;<?= $prio_sel===$k?'border-color:'.$c[1].';':'' ?>">
-          <input type="radio" name="priorite" value="<?= $k ?>" <?= $prio_sel===$k?'checked':'' ?>><span><?= ucfirst(strtolower($k)) ?></span>
-        </label>
-      <?php endforeach; ?>
+    <label class="lbl">Responsable(s) <span class="req">*</span></label>
+    <div class="resp-picker" id="respPicker">
+      <div class="resp-chips" id="respChips" hidden></div>
+      <button type="button" class="resp-toggle form-control" id="respToggle" aria-expanded="false" aria-controls="respDropdown">
+        <span class="resp-toggle-label">Choisir les responsables…</span>
+        <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
+      </button>
+      <div class="resp-dropdown" id="respDropdown" hidden>
+        <input type="search" id="respSearch" class="form-control resp-search"
+               placeholder="Rechercher un nom, une fonction…" autocomplete="off" aria-label="Rechercher un responsable">
+        <div class="resp-list" role="group" aria-label="Responsables">
+          <?php foreach ($users as $u):
+            $rid = 'resp-' . (int)$u['id'];
+            $coche = in_array((int)$u['id'], $resp_sel, true); ?>
+          <label class="resp-item" for="<?= $rid ?>"
+                 data-label="<?= e(mb_strtolower($u['nom_complet'].' '.$u['groupe'].' '.$u['matricule'])) ?>"
+                 data-name="<?= e($u['nom_complet']) ?>">
+            <input type="checkbox" name="responsables[]" id="<?= $rid ?>" value="<?= (int)$u['id'] ?>" <?= $coche ? 'checked' : '' ?>>
+            <span class="resp-item-text">
+              <span class="resp-name"><?= e($u['nom_complet']) ?></span>
+              <span class="resp-fonc"><?= e($u['groupe']) ?></span>
+            </span>
+          </label>
+          <?php endforeach; ?>
+        </div>
+        <p class="resp-empty" id="respEmpty" hidden>Aucune personne ne correspond à la recherche.</p>
+      </div>
+    </div>
+    <div class="hint">Une tâche est créée pour chaque responsable ; il est prévenu dans l'ENT et par e-mail.</div>
+  </div>
+  <?php endif; ?>
+
+  <div class="<?= $mode === 'creer' ? 'row-2' : '' ?>">
+    <?php if ($mode === 'creer'): ?>
+    <div class="form-group">
+      <label class="lbl">Délai <span class="req">*</span></label>
+      <div class="delai-mini">
+        <input type="number" name="delai_valeur" class="form-control" min="1" max="999" required value="<?= (int)($old_delval ?? 1) ?>">
+        <select name="delai_unite" class="form-control">
+          <?php foreach (['MINUTE'=>'Minute(s)','HEURE'=>'Heure(s)','JOUR'=>'Jour(s)'] as $k=>$lbl): ?>
+            <option value="<?= $k ?>" <?= ($old_delunit ?? 'HEURE')===$k?'selected':'' ?>><?= $lbl ?></option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div class="hint">À compter de l'émission.</div>
+    </div>
+    <?php endif; ?>
+
+    <div class="form-group">
+      <label class="lbl">Priorité</label>
+      <div class="prio-pills" id="prioPills">
+        <?php $prios = ['FAIBLE'=>['#f3f4f6','#6b7280'],'NORMALE'=>['#dbeafe','#1e40af'],'HAUTE'=>['#ffedd5','#9a3412'],'CRITIQUE'=>['#fee2e2','#991b1b']];
+        foreach ($prios as $k=>$c): ?>
+          <label data-color="<?= $c[1] ?>" style="background:<?= $c[0] ?>;color:<?= $c[1] ?>;<?= $prio_sel===$k?'border-color:'.$c[1].';':'' ?>">
+            <input type="radio" name="priorite" value="<?= $k ?>" <?= $prio_sel===$k?'checked':'' ?>><span><?= ucfirst(strtolower($k)) ?></span>
+          </label>
+        <?php endforeach; ?>
+      </div>
     </div>
   </div>
 
@@ -115,161 +199,98 @@ include __DIR__ . '/../../views/layout/header.php';
       <a href="voir.php?id=<?= $id ?>" class="btn btn-secondary">Annuler</a>
     </div>
   <?php else: ?>
-
-  <hr style="border:none;border-top:1px solid var(--border);margin:22px 0;">
-
-  <div class="form-group">
-    <label class="lbl">Type d'instruction</label>
-    <div class="seg">
-      <input type="radio" name="ui_type" id="ui_unique" value="UNIQUE" checked>
-      <label for="ui_unique"><i class="fa-solid fa-user"></i> Tâche unique</label>
-      <input type="radio" name="ui_type" id="ui_multiple" value="MULTIPLE">
-      <label for="ui_multiple"><i class="fa-solid fa-users"></i> Tâches multiples</label>
-    </div>
-    <div class="hint">Unique = une seule personne, une seule tâche. Multiple = une tâche distincte par personne, avec dépendances possibles.</div>
-  </div>
-
-  <div id="tasksContainer"></div>
-
-  <button type="button" class="btn btn-secondary btn-sm" id="addTaskBtn" style="display:none;">
-    <i class="fa-solid fa-plus"></i> Ajouter une tâche
-  </button>
-
-  <div style="display:flex;gap:10px;margin-top:22px;">
+  <div style="display:flex;gap:10px;margin-top:10px;">
     <button type="submit" class="btn btn-primary"><i class="fa-solid fa-paper-plane"></i> Émettre l'instruction</button>
     <a href="index.php" class="btn btn-secondary">Annuler</a>
   </div>
   <?php endif; ?>
 </form>
 
-<?php if ($mode === 'creer'):
-  // Données utilisateurs pour le JS
-  $users_json = json_encode(array_map(fn($u)=>['id'=>(int)$u['id'],'nom'=>$u['nom_complet'].' · '.$u['groupe']], $users), JSON_UNESCAPED_UNICODE);
-?>
 <script>
-const USERS = <?= $users_json ?>;
-const container = document.getElementById('tasksContainer');
-const addBtn = document.getElementById('addTaskBtn');
-let multiple = false;
-
-function userOptions(sel){
-  return '<option value="">— Choisir —</option>' +
-    USERS.map(u=>`<option value="${u.id}"${sel==u.id?' selected':''}>${u.nom}</option>`).join('');
-}
-
-function buildRow(){
-  const div = document.createElement('div');
-  div.className = 'task-row';
-  div.innerHTML = `
-    <div class="task-head">
-      <span class="task-num"></span>
-      <button type="button" class="btn-del-task" title="Supprimer"><i class="fa-solid fa-trash"></i></button>
-    </div>
-    <div class="form-group" style="margin-bottom:12px;">
-      <label class="lbl">Tâche à faire <span class="req">*</span></label>
-      <input type="text" class="form-control f-titre" placeholder="Ex : Préparer les bordereaux de paiement">
-    </div>
-    <div class="form-group" style="margin-bottom:12px;">
-      <label class="lbl" style="font-weight:600;">Détails (facultatif)</label>
-      <textarea class="form-control f-desc" rows="2" placeholder="Précisions sur la tâche…"></textarea>
-    </div>
-    <div class="grid3">
-      <div>
-        <label class="lbl" style="font-weight:600;">Responsable <span class="req">*</span></label>
-        <select class="form-control f-assigne">${userOptions('')}</select>
-      </div>
-      <div>
-        <label class="lbl" style="font-weight:600;">Délai <span class="req">*</span></label>
-        <div class="delai-mini">
-          <input type="number" class="form-control f-delval" min="1" max="999" value="1">
-          <select class="form-control f-delunit">
-            <option value="MINUTE">Minute(s)</option><option value="HEURE" selected>Heure(s)</option><option value="JOUR">Jour(s)</option>
-          </select>
-        </div>
-      </div>
-      <div>
-        <label class="lbl" style="font-weight:600;">Priorité</label>
-        <select class="form-control f-prio">
-          <option value="FAIBLE">Faible</option><option value="NORMALE" selected>Normale</option>
-          <option value="HAUTE">Haute</option><option value="CRITIQUE">Critique</option>
-        </select>
-      </div>
-    </div>
-    <div class="dep-zone dep-block" style="display:none;">
-      <label class="lbl" style="font-weight:600;"><i class="fa-solid fa-link"></i> Dépendance</label>
-      <div class="grid2">
-        <select class="form-control f-deptype">
-          <option value="INDEPENDANTE">Indépendante</option>
-          <option value="APRES_FIN">Après la FIN d'une autre tâche</option>
-          <option value="APRES_DEBUT">Après le DÉBUT d'une autre tâche</option>
-        </select>
-        <select class="form-control f-depde" disabled></select>
-      </div>
-      <div class="hint">Une tâche dépendante reste « en attente » : son délai démarre quand la tâche liée est déclenchée.</div>
-    </div>`;
-  // suppression
-  div.querySelector('.btn-del-task').addEventListener('click', ()=>{ div.remove(); renumber(); });
-  // activer/désactiver le choix de la tâche liée
-  const dt = div.querySelector('.f-deptype'), dd = div.querySelector('.f-depde');
-  dt.addEventListener('change', ()=>{ dd.disabled = (dt.value==='INDEPENDANTE'); if(dd.disabled) dd.value=''; });
-  container.appendChild(div);
-  renumber();
-  return div;
-}
-
-function renumber(){
-  const rows = [...container.querySelectorAll('.task-row')];
-  rows.forEach((r,i)=>{
-    r.querySelector('.task-num').textContent = 'Tâche N°' + (i+1);
-    r.querySelector('.btn-del-task').style.display = (multiple && rows.length>1) ? 'inline' : 'none';
-    // attribuer les noms de champs (contigus)
-    r.querySelector('.f-titre').name   = `taches[${i}][titre]`;
-    r.querySelector('.f-desc').name    = `taches[${i}][description]`;
-    r.querySelector('.f-assigne').name = `taches[${i}][assigne_a]`;
-    r.querySelector('.f-delval').name  = `taches[${i}][delai_valeur]`;
-    r.querySelector('.f-delunit').name = `taches[${i}][delai_unite]`;
-    r.querySelector('.f-prio').name    = `taches[${i}][priorite]`;
-    const dt = r.querySelector('.f-deptype'), dd = r.querySelector('.f-depde');
-    dt.name = `taches[${i}][dependance_type]`;
-    dd.name = `taches[${i}][depend_row]`;
-    r.querySelector('.dep-block').style.display = multiple ? 'block' : 'none';
-  });
-  // reconstruire les listes de tâches liées (uniquement tâches précédentes)
-  rows.forEach((r,i)=>{
-    const dd = r.querySelector('.f-depde'); const cur = dd.value;
-    let opts = '<option value="">— Choisir —</option>';
-    rows.forEach((r2,j)=>{
-      if (j===i) return;
-      const titre = r2.querySelector('.f-titre').value || ('Tâche N°'+(j+1));
-      opts += `<option value="${j+1}">N°${j+1} — ${titre.substring(0,40)}</option>`;
+(function(){
+  const pills = document.getElementById('prioPills');
+  if (!pills) return;
+  function majPrio(){
+    pills.querySelectorAll('label').forEach(l => {
+      l.style.borderColor = l.querySelector('input').checked ? l.dataset.color : 'transparent';
     });
-    dd.innerHTML = opts; if(cur) dd.value = cur;
-  });
-}
-
-function setMode(isMulti){
-  multiple = isMulti;
-  addBtn.style.display = isMulti ? 'inline-flex' : 'none';
-  if (!isMulti){
-    // garder une seule tâche
-    const rows = [...container.querySelectorAll('.task-row')];
-    rows.slice(1).forEach(r=>r.remove());
-    // réinitialiser la dépendance
-    const r0 = container.querySelector('.task-row');
-    if (r0){ r0.querySelector('.f-deptype').value='INDEPENDANTE'; const dd=r0.querySelector('.f-depde'); dd.value=''; dd.disabled=true; }
   }
-  renumber();
-}
+  pills.addEventListener('change', majPrio);
+})();
+</script>
 
-document.getElementById('ui_unique').addEventListener('change', ()=>setMode(false));
-document.getElementById('ui_multiple').addEventListener('change', ()=>setMode(true));
-addBtn.addEventListener('click', ()=>buildRow());
-// rafraîchir les libellés des dépendances quand un titre change
-container.addEventListener('input', e=>{ if(e.target.classList.contains('f-titre')) renumber(); });
+<?php if ($mode === 'creer'): ?>
+<script>
+(function(){
+  const picker   = document.getElementById('respPicker');
+  const toggle   = document.getElementById('respToggle');
+  const dropdown = document.getElementById('respDropdown');
+  const search   = document.getElementById('respSearch');
+  const list     = picker.querySelector('.resp-list');
+  const empty    = document.getElementById('respEmpty');
+  const chips    = document.getElementById('respChips');
+  const label    = toggle.querySelector('.resp-toggle-label');
 
-// première tâche
-buildRow();
-setMode(false);
+  function setOpen(open){
+    dropdown.hidden = !open;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) {
+      search.value = '';
+      filtrer('');
+      setTimeout(() => search.focus(), 0);
+    }
+  }
+
+  function filtrer(q){
+    let visibles = 0;
+    list.querySelectorAll('.resp-item').forEach(item => {
+      const ok = !q || item.dataset.label.includes(q);
+      item.hidden = !ok;
+      if (ok) visibles++;
+    });
+    empty.hidden = visibles > 0;
+  }
+
+  function syncChips(){
+    const coches = [...list.querySelectorAll('input:checked')];
+    chips.innerHTML = '';
+    chips.hidden = coches.length === 0;
+    toggle.classList.toggle('has-sel', coches.length > 0);
+    label.textContent = coches.length === 0 ? 'Choisir les responsables…'
+      : coches.length === 1 ? '1 responsable sélectionné'
+      : coches.length + ' responsables sélectionnés';
+    coches.forEach(cb => {
+      const nom = cb.closest('.resp-item').dataset.name;
+      const chip = document.createElement('span');
+      chip.className = 'resp-chip';
+      chip.textContent = nom + ' ';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.setAttribute('aria-label', 'Retirer ' + nom);
+      btn.innerHTML = '&times;';
+      btn.addEventListener('click', () => { cb.checked = false; syncChips(); });
+      chip.appendChild(btn);
+      chips.appendChild(chip);
+    });
+  }
+
+  toggle.addEventListener('click', e => { e.preventDefault(); setOpen(dropdown.hidden); });
+  search.addEventListener('input', () => filtrer(search.value.trim().toLowerCase()));
+  search.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+  list.addEventListener('change', syncChips);
+  document.addEventListener('click', e => { if (!picker.contains(e.target)) setOpen(false); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') setOpen(false); });
+
+  document.getElementById('instrForm').addEventListener('submit', e => {
+    if (!list.querySelector('input:checked')) {
+      e.preventDefault();
+      setOpen(true);
+      alert('Choisissez au moins un responsable.');
+    }
+  });
+
+  syncChips();
+})();
 </script>
 <?php endif; ?>
 

@@ -592,8 +592,53 @@ function itache_output_supprimer(int $id): array {
 // MISE A JOUR SUR ECHNAGES DG
 
 
+// Crée au besoin les tables du fil d'échanges et des notifications (sans effet si elles existent)
+function instr_assurer_schema(): void {
+    static $fait = false;
+    if ($fait) return;
+    $fait = true;
+    $db = get_db();
+    $tables = [
+        'instructions_taches_echanges' => "
+            id             int UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            tache_id       int UNSIGNED NOT NULL,
+            instruction_id int UNSIGNED NOT NULL,
+            auteur_id      int UNSIGNED NOT NULL,
+            type           enum('MESSAGE','SOUMISSION','VALIDATION','REJET') NOT NULL DEFAULT 'MESSAGE',
+            message        text DEFAULT NULL,
+            cree_le        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_ite_tache (tache_id),
+            KEY idx_ite_instr (instruction_id)",
+        'instructions_notifications' => "
+            id             int UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            utilisateur_id int UNSIGNED NOT NULL,
+            instruction_id int UNSIGNED NOT NULL,
+            tache_id       int UNSIGNED DEFAULT NULL,
+            titre          varchar(150) NOT NULL,
+            message        varchar(500) DEFAULT NULL,
+            lu             tinyint(1) NOT NULL DEFAULT 0,
+            cree_le        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_in_user (utilisateur_id, lu),
+            KEY idx_in_instr (instruction_id)",
+    ];
+    $fk = [
+        'instructions_taches_echanges' => 'CONSTRAINT fk_ite_tache FOREIGN KEY (tache_id) REFERENCES instructions_taches(id) ON DELETE CASCADE',
+        'instructions_notifications'   => 'CONSTRAINT fk_in_instr FOREIGN KEY (instruction_id) REFERENCES instructions(id) ON DELETE CASCADE',
+    ];
+    foreach ($tables as $nom => $cols) {
+        $suffixe = ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS $nom ($cols, {$fk[$nom]}$suffixe");
+        } catch (Throwable $e) {
+            try { $db->exec("CREATE TABLE IF NOT EXISTS $nom ($cols$suffixe"); }
+            catch (Throwable $e2) { error_log("[CRICT instructions] CREATE $nom : " . $e2->getMessage()); }
+        }
+    }
+}
+
 // Charger le fil d'échanges d'une tâche
 function itache_echanges(int $tache_id): array {
+    instr_assurer_schema();
     $s = get_db()->prepare("
         SELECT ec.*, CONCAT(u.prenoms,' ',u.nom) AS auteur_nom, g.code AS auteur_groupe
         FROM instructions_taches_echanges ec
@@ -610,6 +655,7 @@ function itache_echanges(int $tache_id): array {
 function itache_echange_ajouter(int $tache_id, int $instruction_id, int $auteur_id, string $message, string $type = 'MESSAGE'): array {
     $message = trim($message);
     if ($message === '' && $type === 'MESSAGE') return ['succes'=>false,'message'=>'Le message est vide.'];
+    instr_assurer_schema();
     try {
         get_db()->prepare("INSERT INTO instructions_taches_echanges
                              (tache_id, instruction_id, auteur_id, type, message)
@@ -694,6 +740,60 @@ function itache_rejeter(int $tache_id, int $user_id, string $note): array {
         error_log('[CRICT itache_rejeter] ' . $e->getMessage());
         return ['succes'=>false,'message'=>'Erreur lors du renvoi.'];
     }
+}
+
+// ──────────────────────────────────────────────────────────
+// NOTIFICATIONS INTERNES (badge du menu « Instructions »)
+// ──────────────────────────────────────────────────────────
+
+function instr_notif_creer(int $utilisateur_id, int $instruction_id, ?int $tache_id, string $titre, string $message = ''): void {
+    if ($utilisateur_id <= 0 || $instruction_id <= 0) return;
+    instr_assurer_schema();
+    try {
+        get_db()->prepare("INSERT INTO instructions_notifications (utilisateur_id, instruction_id, tache_id, titre, message)
+                           VALUES (?,?,?,?,?)")
+                ->execute([$utilisateur_id, $instruction_id, $tache_id ?: null,
+                           mb_substr($titre, 0, 150), $message !== '' ? mb_substr($message, 0, 500) : null]);
+    } catch (Throwable $e) {
+        error_log('[CRICT instructions] notif : ' . $e->getMessage());
+    }
+}
+
+// Appelée par le menu sur chaque page : ne crée pas la table, renvoie 0 si elle n'existe pas encore
+function instr_notifs_non_lues(int $utilisateur_id): int {
+    if ($utilisateur_id <= 0) return 0;
+    try {
+        $s = get_db()->prepare("SELECT COUNT(*) FROM instructions_notifications n
+                                JOIN instructions i ON i.id = n.instruction_id
+                                WHERE n.utilisateur_id=? AND n.lu=0");
+        $s->execute([$utilisateur_id]);
+        return (int)$s->fetchColumn();
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+function instr_notif_premiere_non_lue(int $utilisateur_id): ?array {
+    if ($utilisateur_id <= 0) return null;
+    try {
+        $s = get_db()->prepare("SELECT n.* FROM instructions_notifications n
+                                JOIN instructions i ON i.id = n.instruction_id
+                                WHERE n.utilisateur_id=? AND n.lu=0
+                                ORDER BY n.cree_le DESC, n.id DESC LIMIT 1");
+        $s->execute([$utilisateur_id]);
+        return $s->fetch() ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function instr_notif_marquer_lues(int $utilisateur_id, int $instruction_id): void {
+    if ($utilisateur_id <= 0 || $instruction_id <= 0) return;
+    try {
+        get_db()->prepare("UPDATE instructions_notifications SET lu=1
+                           WHERE utilisateur_id=? AND instruction_id=? AND lu=0")
+                ->execute([$utilisateur_id, $instruction_id]);
+    } catch (Throwable $e) {}
 }
 
 // ──────────────────────────────────────────────────────────

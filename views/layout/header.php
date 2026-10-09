@@ -632,10 +632,25 @@ $module_actif  = $module_actif ?? '';
     <?php endif; ?>
     
     <?php if (in_array('INSTRUCTIONS', $modules_acces)): ?>
-    <a href="<?= APP_URL ?>/modules/instructions/index.php"
+    <?php
+      // Badge : notifications d'instructions non lues (nouvelle tâche, soumission, validation, message…)
+      $in_nav_n = 0;
+      if (is_file(APP_ROOT . '/models/instruction.php')) {
+          require_once APP_ROOT . '/models/instruction.php';
+          try {
+              $in_nav_n = instr_notifs_non_lues((int)user_id());
+          } catch (Throwable $e) {
+              $in_nav_n = 0;
+          }
+      }
+    ?>
+    <a href="<?= APP_URL ?>/modules/instructions/index.php<?= $in_nav_n > 0 ? '?voir_alerte=1' : '' ?>"
        class="nav-item <?= $module_actif === 'INSTRUCTIONS' ? 'active' : '' ?>">
       <span class="icon"><i class="fa-solid fa-bullhorn"></i></span>
       <span class="label">Instructions</span>
+      <?php if ($in_nav_n > 0): ?>
+        <span class="nav-badge"><?= (int)$in_nav_n ?></span>
+      <?php endif; ?>
     </a>
     <?php endif; ?>
 

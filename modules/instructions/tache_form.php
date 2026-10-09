@@ -38,14 +38,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
     if ($mode === 'creer') {
         $r = itache_creer($instruction_id, $d);
         if ($r['succes']) {
-            if (MAIL_ENABLED) notifier_instruction($instruction_id, [$r['tache_id']]);
-            set_flash('success','Tâche ajoutée et responsable notifié.');
+            $n = instr_notifier_nouvelles_taches($instruction_id, [$r['tache_id']]);
+            set_flash('success', $n['notifies'] ? 'Tâche ajoutée et responsable notifié.' : 'Tâche ajoutée.');
             redirect('/modules/instructions/voir.php?id='.$instruction_id.'#t'.$r['tache_id']);
         }
         set_flash('error', $r['message'] ?? 'Erreur.');
     } else {
+        $ancien_resp = (int)($tache['assigne_a'] ?? 0);
         $r = itache_modifier($tache_id, $d);
-        if ($r['succes']) { set_flash('success','Tâche modifiée.'); redirect('/modules/instructions/voir.php?id='.$instruction_id.'#t'.$tache_id); }
+        if ($r['succes']) {
+            $msg = 'Tâche modifiée.';
+            if ($d['assigne_a'] !== $ancien_resp && instr_notifier_nouvelles_taches($instruction_id, [$tache_id])['notifies']) {
+                $msg = 'Tâche modifiée et nouveau responsable notifié.';
+            }
+            set_flash('success', $msg);
+            redirect('/modules/instructions/voir.php?id='.$instruction_id.'#t'.$tache_id);
+        }
         set_flash('error', $r['message'] ?? 'Erreur.');
     }
     $tache = array_merge($tache ?? [], $d); // préserver la saisie sur erreur

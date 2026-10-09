@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/helpers.php';
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../models/instruction.php';
+require_once __DIR__ . '/../../includes/mailer_instructions.php';
 
 session_demarrer();
 exiger_permission('INSTRUCTIONS', 'VOIR');
@@ -16,6 +17,8 @@ if (!$id) redirect('/modules/instructions/index.php');
 $instr = instruction_charger($id);
 if (!$instr) { set_flash('error','Instruction introuvable.'); redirect('/modules/instructions/index.php'); }
 
+instr_notif_marquer_lues((int)$user['id'], $id);
+
 $est_emetteur = _instr_est_emetteur($id, (int)$user['id']);   // = le DG / émetteur
 $a_une_tache  = _instr_a_une_tache($id, (int)$user['id']);
 if (!$est_emetteur && !$a_une_tache) { set_flash('error','Accès refusé.'); redirect('/modules/instructions/index.php'); }
@@ -23,6 +26,7 @@ if (!$est_emetteur && !$a_une_tache) { set_flash('error','Accès refusé.'); red
 // Accusé de réception sur les tâches du destinataire
 get_db()->prepare("UPDATE instructions_taches SET vue_le=NOW() WHERE instruction_id=? AND assigne_a=? AND vue_le IS NULL")
         ->execute([$id, (int)$user['id']]);
+$focus_id = (int)($_GET['focus'] ?? 0);
 
 // Statuts pendant lesquels le responsable peut encore déposer/retirer des pièces jointes
 $STATUTS_MODIFIABLES = ['A_FAIRE','EN_COURS'];
@@ -50,18 +54,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
 
     } elseif ($action === 'tache_soumettre' && $ok_tache && (int)$ok_tache['assigne_a'] === (int)$user['id']) {
         $r = itache_soumettre($tache_id, (int)$user['id'], trim($_POST['message'] ?? ''));
+        if ($r['succes']) instr_notifier_evenement('SOUMISSION', $tache_id, trim($_POST['message'] ?? ''));
         set_flash($r['succes']?'success':'error', $r['succes'] ? 'Travail soumis au DG pour validation.' : ($r['message'] ?? 'Erreur.'));
 
     } elseif ($action === 'tache_valider' && $ok_tache && $est_emetteur) {
         $r = itache_valider($tache_id, (int)$user['id'], trim($_POST['message'] ?? ''));
+        if ($r['succes']) instr_notifier_evenement('VALIDATION', $tache_id, trim($_POST['message'] ?? ''));
         set_flash($r['succes']?'success':'error', $r['succes'] ? 'Tâche validée et clôturée.' : ($r['message'] ?? 'Erreur.'));
 
     } elseif ($action === 'tache_rejeter' && $ok_tache && $est_emetteur) {
         $r = itache_rejeter($tache_id, (int)$user['id'], trim($_POST['note'] ?? ''));
+        if ($r['succes']) instr_notifier_evenement('REJET', $tache_id, trim($_POST['note'] ?? ''));
         set_flash($r['succes']?'success':'error', $r['succes'] ? 'Tâche renvoyée au responsable pour amélioration.' : ($r['message'] ?? 'Erreur.'));
 
     } elseif ($action === 'echange_ajouter' && $ok_tache && ((int)$ok_tache['assigne_a'] === (int)$user['id'] || $est_emetteur)) {
         $r = itache_echange_ajouter($tache_id, $id, (int)$user['id'], trim($_POST['message'] ?? ''));
+        if ($r['succes']) instr_notifier_evenement('MESSAGE', $tache_id, trim($_POST['message'] ?? ''));
         set_flash($r['succes']?'success':'error', $r['succes'] ? 'Message envoyé.' : ($r['message'] ?? 'Erreur.'));
 
     } elseif ($action === 'output_fichier' && $ok_tache && !empty($_FILES['fichier']['name'][0])) {
@@ -102,7 +110,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
         itache_supprimer($tache_id); set_flash('success','Tâche supprimée.');
 
     } elseif ($action === 'annuler' && $est_emetteur) {
-        instruction_annuler($id); set_flash('success','Instruction annulée.');
+        $r = instruction_annuler($id);
+        if ($r['succes']) instr_notifier_annulation($id);
+        set_flash($r['succes']?'success':'error', $r['succes'] ? 'Instruction annulée et responsables prévenus.' : ($r['message'] ?? 'Erreur.'));
     }
     redirect('/modules/instructions/voir.php?id=' . $id . ($tache_id ? '#t'.$tache_id : ''));
 }
@@ -149,6 +159,7 @@ include __DIR__ . '/../../views/layout/header.php';
 .contenu-box{font-size:.9rem;line-height:1.7;color:var(--text);white-space:pre-wrap;}
 .tk{border:1.5px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:14px;}
 .tk.mine{border-color:var(--blue-400);box-shadow:0 0 0 3px rgba(59,130,246,.08);}
+.tk.focus{border-color:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.18);}
 .tk-head{display:flex;align-items:flex-start;gap:10px;justify-content:space-between;margin-bottom:8px;}
 .tk-code{font-size:.66rem;font-weight:700;color:var(--text-muted);letter-spacing:.07em;}
 .tk-titre{font-size:.96rem;font-weight:800;color:var(--text);line-height:1.3;}
@@ -217,7 +228,7 @@ include __DIR__ . '/../../views/layout/header.php';
         $modifiable = in_array($t['statut'], $STATUTS_MODIFIABLES, true);  // responsable peut encore agir
         $peut_echanger = ($mine || $est_emetteur) && !$verrouille && !$bloquee;
       ?>
-      <div class="tk <?= $mine?'mine':'' ?>" id="t<?= $t['id'] ?>">
+      <div class="tk <?= $mine?'mine':'' ?><?= $focus_id===(int)$t['id']?' focus':'' ?>" id="t<?= $t['id'] ?>">
         <div class="tk-head">
           <div style="min-width:0;">
             <div class="tk-code"><?= e($t['code']) ?><?= $mine ? ' · <span style="color:var(--blue-600);">Vous</span>' : '' ?></div>
@@ -459,6 +470,10 @@ function tickAll(){
   });
 }
 tickAll(); setInterval(tickAll,1000);
+(function(){
+  var el = document.querySelector('.tk.focus');
+  if (el) setTimeout(function(){ el.scrollIntoView({behavior:'smooth', block:'center'}); }, 120);
+})();
 </script>
 JS;
 include __DIR__ . '/../../views/layout/footer.php';
