@@ -242,6 +242,7 @@ function courrier_template_affectation(array $user, array $courrier): string {
     $reference = $h($courrier['reference'] ?? '');
     $objet     = $h($courrier['objet'] ?? '');
     $exp       = $h($courrier['correspondant_nom'] ?? $courrier['correspondant_organisation'] ?? '—');
+    $exp_lbl   = ($courrier['sens'] ?? '') === 'SORTANT' ? 'Destinataire' : 'Expéditeur';
     $instr     = trim((string)($courrier['instruction'] ?? ''));
     $instr_h   = $instr !== '' ? nl2br($h($instr)) : 'Aucune instruction particulière.';
     $url       = $h(rtrim(APP_URL,'/').'/modules/courriers/voir.php?id='.((int)($courrier['id'] ?? 0)));
@@ -283,7 +284,7 @@ HTML;
       </tr>
       <tr><td colspan="2" style="border-top:1px solid {$border};font-size:0;line-height:0;">&nbsp;</td></tr>
       <tr>
-        <td style="padding:7px 0;font-size:12px;color:{$muted};text-transform:uppercase;letter-spacing:.5px;">Expéditeur</td>
+        <td style="padding:7px 0;font-size:12px;color:{$muted};text-transform:uppercase;letter-spacing:.5px;">{$exp_lbl}</td>
         <td style="padding:7px 0;font-size:14px;color:{$text};font-weight:600;">{$exp}</td>
       </tr>
       <tr><td colspan="2" style="border-top:1px solid {$border};font-size:0;line-height:0;">&nbsp;</td></tr>

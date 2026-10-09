@@ -128,7 +128,8 @@ function courrier_lister(array $f = [], int $limite = 15, int $offset = 0): arra
                CONCAT(u.prenoms,' ',u.nom)  AS affecte_nom,
                CONCAT(e.prenoms,' ',e.nom)  AS enregistreur_nom,
                s.nom                        AS service_nom,
-               COUNT(d.id)                  AS nb_documents
+               COUNT(d.id)                  AS nb_documents,
+               EXISTS (SELECT 1 FROM courriers_affectations pa WHERE pa.courrier_id=c.id AND pa.role='PILOTE') AS a_pilote
         FROM courriers c
         LEFT JOIN utilisateurs u             ON u.id = c.affecte_a
         LEFT JOIN utilisateurs e             ON e.id = c.enregistre_par
@@ -992,23 +993,25 @@ function courrier_nb_a_valider(): int {
 // COURRIERS SORTANTS : validation par le DG, puis envoi
 //   RECU (À valider) → TRAITE (Validé) → CLOTURE (Envoyé)
 //   Renvoi pour correction : EN_TRAITEMENT (À corriger) → RECU
+//   Si le DG l'affecte : AFFECTE → EN_TRAITEMENT (pilote) → soumis → TRAITE (Validé)
 // ══════════════════════════════════════════════════════════
 
 define('COURRIER_COND_A_VALIDER', "(EXISTS (SELECT 1 FROM courriers_affectations v WHERE v.courrier_id=c.id AND v.role='PILOTE' AND v.statut='SOUMIS')
-                                   OR (c.sens='SORTANT' AND c.statut IN ('RECU','AFFECTE')))");
+                                   OR (c.sens='SORTANT' AND c.statut='RECU'))");
 
-// Libellé du statut selon le sens (un sortant n'est pas « reçu » mais « à valider »)
-function courrier_statut_info(string $statut, string $sens): array {
+// Libellé du statut selon le sens (un sortant n'est pas « reçu » mais « à valider »).
+// $avec_pilote : un sortant EN_TRAITEMENT est « En traitement » chez le pilote, sinon « À corriger ».
+function courrier_statut_info(string $statut, string $sens, bool $avec_pilote = false): array {
     $tous = courrier_statuts();
     $s = $tous[$statut] ?? $tous['RECU'];
     if ($sens === 'SORTANT') {
         $sortant = [
             'RECU'          => ['label' => 'À valider',  'icon' => 'fa-hourglass-half'],
-            'AFFECTE'       => ['label' => 'À valider',  'icon' => 'fa-hourglass-half'],
             'EN_TRAITEMENT' => ['label' => 'À corriger', 'icon' => 'fa-pen-to-square'],
             'TRAITE'        => ['label' => 'Validé',     'icon' => 'fa-circle-check'],
             'CLOTURE'       => ['label' => 'Envoyé',     'icon' => 'fa-paper-plane'],
         ];
+        if ($avec_pilote) unset($sortant['EN_TRAITEMENT']);
         if (isset($sortant[$statut])) $s = array_merge($s, $sortant[$statut]);
     }
     return $s;
@@ -1035,9 +1038,11 @@ function courrier_peut_expedier(array $cour): bool {
 }
 
 // Après correction : l'enregistreur ou le secrétariat (MODIFIER) soumet à nouveau au DG
+// (un sortant affecté est soumis par son agent pilote)
 function courrier_peut_resoumettre(array $cour): bool {
     return ($cour['sens'] ?? '') === 'SORTANT' && ($cour['statut'] ?? '') === 'EN_TRAITEMENT'
-        && (courrier_est_enregistreur($cour) || a_permission('COURRIERS', 'MODIFIER'));
+        && (courrier_est_enregistreur($cour) || a_permission('COURRIERS', 'MODIFIER'))
+        && courrier_pilote((int)$cour['id']) === null;
 }
 
 // Fil d'échanges : DG, agents affectés et, pour un sortant, la personne qui l'a enregistré
@@ -1062,10 +1067,12 @@ function courrier_sortant_valider(int $cid, string $message = ''): array {
     try {
         get_db()->prepare("UPDATE courriers SET statut='TRAITE', traite_par=?, date_traitement=NOW() WHERE id=?")
                 ->execute([user_id(), $cid]);
+        $p = courrier_pilote($cid);
+        if ($p) get_db()->prepare("UPDATE courriers_affectations SET statut='VALIDE' WHERE id=?")->execute([$p['id']]);
         courrier_echange_ajouter($cid, $message, 'VALIDATION');
         courrier_suivi_ajouter($cid, 'VALIDATION', 'Courrier sortant validé par le DG pour envoi' . (trim($message) !== '' ? ' : ' . trim($message) : ''), $c['statut'], 'TRAITE');
         log_activite(user_id(), 'COURRIERS', 'VALIDATION', "Courrier sortant $cid validé");
-        return ['succes'=>true];
+        return ['succes'=>true, 'pilote'=>$p];
     } catch (Throwable $e) {
         error_log('[CRICT courrier_sortant_valider] '.$e->getMessage());
         return ['succes'=>false,'message'=>'Erreur lors de la validation.'];
@@ -1078,6 +1085,25 @@ function courrier_sortant_renvoyer(int $cid, string $motif): array {
     if ($motif === '')      return ['succes'=>false,'message'=>'Précisez les corrections attendues.'];
     $c = _courrier_sens_statut($cid);
     if (!$c || $c['sens'] !== 'SORTANT') return ['succes'=>false,'message'=>'Courrier sortant introuvable.'];
+
+    // Sortant affecté : retour à l'agent pilote
+    $p = courrier_pilote($cid);
+    if ($p) {
+        if ($p['statut'] !== 'SOUMIS' && $c['statut'] !== 'TRAITE')
+            return ['succes'=>false,'message'=>'L\'agent pilote n\'a pas encore soumis ce courrier.'];
+        try {
+            get_db()->prepare("UPDATE courriers_affectations SET statut='EN_COURS', soumis_le=NULL WHERE id=?")->execute([$p['id']]);
+            get_db()->prepare("UPDATE courriers SET statut='EN_TRAITEMENT', traite_par=NULL, date_traitement=NULL WHERE id=?")->execute([$cid]);
+            courrier_echange_ajouter($cid, $motif, 'REJET');
+            courrier_suivi_ajouter($cid, 'RENVOI', 'Renvoyé à l\'agent pilote : ' . $motif, $c['statut'], 'EN_TRAITEMENT');
+            log_activite(user_id(), 'COURRIERS', 'REJET', "Courrier sortant $cid renvoyé au pilote");
+            return ['succes'=>true, 'pilote'=>$p];
+        } catch (Throwable $e) {
+            error_log('[CRICT courrier_sortant_renvoyer] '.$e->getMessage());
+            return ['succes'=>false,'message'=>'Erreur lors du renvoi.'];
+        }
+    }
+
     if (!in_array($c['statut'], ['RECU', 'AFFECTE', 'TRAITE'], true))
         return ['succes'=>false,'message'=>'Ce courrier ne peut plus être renvoyé en correction.'];
     try {
@@ -1085,7 +1111,7 @@ function courrier_sortant_renvoyer(int $cid, string $motif): array {
         courrier_echange_ajouter($cid, $motif, 'REJET');
         courrier_suivi_ajouter($cid, 'RENVOI', 'Renvoyé pour correction : ' . $motif, $c['statut'], 'EN_TRAITEMENT');
         log_activite(user_id(), 'COURRIERS', 'REJET', "Courrier sortant $cid renvoyé en correction");
-        return ['succes'=>true];
+        return ['succes'=>true, 'pilote'=>null];
     } catch (Throwable $e) {
         error_log('[CRICT courrier_sortant_renvoyer] '.$e->getMessage());
         return ['succes'=>false,'message'=>'Erreur lors du renvoi.'];

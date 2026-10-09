@@ -218,7 +218,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && (int)($_SERVER['CO
                 courrier_notifier_sortant_a_valider(array_merge($data, ['id' => $id_cible, 'reference' => $res['reference']]));
                 set_flash('info', 'Le DG est prévenu : le courrier pourra être envoyé au destinataire dès qu\'il l\'aura validé.');
             }
-            if ($mode === 'modifier' && !$entrant && ($cour['statut'] ?? '') === 'EN_TRAITEMENT') {
+            if ($mode === 'modifier' && !$entrant && ($cour['statut'] ?? '') === 'EN_TRAITEMENT' && courrier_pilote($id_cible) === null) {
                 set_flash('info', 'Une fois les corrections terminées, cliquez sur « Soumettre à nouveau au DG » sur la fiche du courrier.');
             }
 

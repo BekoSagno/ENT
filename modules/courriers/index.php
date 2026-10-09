@@ -170,8 +170,8 @@ include __DIR__ . '/../../views/layout/header.php';
     <select id="fstatut" class="form-control">
       <option value="">Tous</option>
       <?php foreach ($STATUTS as $k=>$v):
-        if ($f['sens'] === 'SORTANT' && $k === 'AFFECTE') continue;
-        $lbl = $f['sens'] === 'SORTANT' ? courrier_statut_info($k, 'SORTANT')['label'] : $v['label']; ?>
+        $lbl = $f['sens'] !== 'SORTANT' ? $v['label']
+             : ($k === 'EN_TRAITEMENT' ? 'En traitement / à corriger' : courrier_statut_info($k, 'SORTANT')['label']); ?>
         <option value="<?= $k ?>" <?= $f['statut']===$k?'selected':'' ?>><?= $lbl ?></option>
       <?php endforeach; ?>
     </select>
@@ -245,7 +245,7 @@ include __DIR__ . '/../../views/layout/header.php';
   </thead>
   <tbody>
   <?php foreach ($courriers as $c):
-    $st = courrier_statut_info($c['statut'], $c['sens']);
+    $st = courrier_statut_info($c['statut'], $c['sens'], !empty($c['a_pilote']));
     $pr = $PRIOS[$c['priorite']] ?? $PRIOS['NORMALE'];
     $cn = $CANAUX[$c['canal']] ?? $CANAUX['AUTRE'];
     $en_retard = !empty($c['date_echeance']) && $c['date_echeance'] < date('Y-m-d')
@@ -316,6 +316,11 @@ include __DIR__ . '/../../views/layout/header.php';
                     style="background:#fee2e2;border:1px solid #fecaca;color:#991b1b;border-radius:7px;width:30px;height:30px;cursor:pointer;font-size:.78rem;">
               <i class="fa-solid fa-trash"></i>
             </button>
+          <?php endif; ?>
+          <?php if ($est_dg && in_array($c['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true)): ?>
+            <a href="voir.php?id=<?= $c['id'] ?>&amp;affecter=1" class="btn btn-primary btn-sm" title="Choisir le service, l'agent pilote, les copies et le délai">
+              <i class="fa-solid fa-share-from-square"></i> Affecter
+            </a>
           <?php endif; ?>
         </div>
       </td>

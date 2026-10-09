@@ -34,7 +34,8 @@ courrier_notif_marquer_lues($uid, $cid);
 $entrant        = $cour['sens'] === 'ENTRANT';
 $peut_modifier  = a_permission('COURRIERS', 'MODIFIER') && !courrier_sortant_verrouille($cour);
 $peut_supprimer = a_permission('COURRIERS', 'SUPPRIMER');
-$peut_affecter  = $entrant && $est_dg && in_array($cour['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true);
+$peut_affecter  = $est_dg && in_array($cour['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true);
+$ouvrir_affect  = $peut_affecter && !empty($_GET['affecter']);
 $peut_archiver  = ($est_dg || a_permission('COURRIERS', 'VALIDER'))
                   && in_array($cour['statut'], $entrant ? ['TRAITE', 'CLOTURE'] : ['CLOTURE'], true);
 $peut_cloturer  = $entrant && $est_dg && !in_array($cour['statut'], ['CLOTURE', 'ARCHIVE'], true);
@@ -42,7 +43,9 @@ $peut_ecrire    = courrier_peut_ecrire($cour);
 // Sortant : validation du DG puis envoi
 $sortant_a_valider = !$entrant && in_array($cour['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true);
 $peut_valider_s    = !$entrant && $est_dg && $sortant_a_valider;
-$peut_renvoyer_s   = !$entrant && $est_dg && in_array($cour['statut'], ['RECU', 'AFFECTE', 'TRAITE'], true);
+$peut_renvoyer_s   = !$entrant && $est_dg && ($pilote
+                       ? ($pilote['statut'] === 'SOUMIS' || $cour['statut'] === 'TRAITE')
+                       : in_array($cour['statut'], ['RECU', 'AFFECTE', 'TRAITE'], true));
 $peut_resoumettre  = courrier_peut_resoumettre($cour);
 $peut_expedier     = courrier_peut_expedier($cour);
 $envoi_email       = $cour['canal'] === 'EMAIL';
@@ -56,7 +59,7 @@ $CANAUX  = courrier_canaux();
 $TYPES   = courrier_types();
 $CONFS   = courrier_confidentialites();
 
-$st = courrier_statut_info($cour['statut'], $cour['sens']);
+$st = courrier_statut_info($cour['statut'], $cour['sens'], $pilote !== null);
 $pr = $PRIOS[$cour['priorite']]          ?? $PRIOS['NORMALE'];
 $cn = $CANAUX[$cour['canal']]            ?? $CANAUX['AUTRE'];
 $cf = $CONFS[$cour['confidentialite']]   ?? $CONFS['NORMAL'];
@@ -109,25 +112,41 @@ if ($cour['statut'] === 'RECU') {
 }
 $etat_classe = $pilote_statut === 'SOUMIS' && $est_dg ? 'attente' : (in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true) ? 'ok' : '');
 
-// Sortant : Enregistré → Validation du DG → Envoi → Envoyé
+// Sortant : Enregistré → [Affecté → En traitement, s'il est affecté] → Validation du DG → Envoi → Envoyé
 if (!$entrant) {
-    $mot_envoye     = $envoi_email ? 'Envoyé' : 'Expédié';
-    $etapes_circuit = ['ENR' => 'Enregistré', 'VALID' => 'Validation du DG', 'ENVOI' => $envoi_email ? 'Envoi par email' : 'Expédition', 'FAIT' => $mot_envoye];
-    $idx_etape      = match (true) {
-        $sortant_a_valider            => 1,
-        $cour['statut'] === 'TRAITE'  => 2,
-        default                       => count($etapes_circuit),
-    };
+    $mot_envoye = $envoi_email ? 'Envoyé' : 'Expédié';
+    $envoi_lbl  = $envoi_email ? 'Envoi par email' : 'Expédition';
+    $chez_pilote = $pilote && in_array($cour['statut'], ['AFFECTE', 'EN_TRAITEMENT'], true);
+    if ($pilote) {
+        $etapes_circuit = ['ENR' => 'Enregistré', 'AFF' => 'Affecté', 'TRT' => 'En traitement', 'VALID' => 'Validation du DG', 'ENVOI' => $envoi_lbl, 'FAIT' => $mot_envoye];
+        $idx_etape = match (true) {
+            $cour['statut'] === 'TRAITE'                          => 4,
+            in_array($cour['statut'], ['CLOTURE', 'ARCHIVE'], true) => count($etapes_circuit),
+            $pilote_statut === 'SOUMIS'                           => 3,
+            $pilote_statut === 'EN_COURS'                         => 2,
+            default                                               => 1,
+        };
+    } else {
+        $etapes_circuit = ['ENR' => 'Enregistré', 'VALID' => 'Validation du DG', 'ENVOI' => $envoi_lbl, 'FAIT' => $mot_envoye];
+        $idx_etape = match (true) {
+            $sortant_a_valider            => 1,
+            $cour['statut'] === 'TRAITE'  => 2,
+            default                       => count($etapes_circuit),
+        };
+    }
     $dernier_renvoi = null;
     foreach ($echanges as $m) if ($m['type'] === 'REJET') $dernier_renvoi = $m;
     $date_valid = !empty($cour['date_traitement']) ? ' le ' . format_datetime($cour['date_traitement']) : '';
 
-    if ($cour['statut'] === 'EN_TRAITEMENT') {
+    if ($chez_pilote) {
+        // Message du circuit de traitement (pilote) calculé plus haut
+        $etat_classe = $pilote_statut === 'SOUMIS' && $est_dg ? 'attente' : '';
+    } elseif ($cour['statut'] === 'EN_TRAITEMENT') {
         $etat = 'Renvoyé pour correction par le DG' . ($dernier_renvoi ? ' : « ' . e($dernier_renvoi['message']) . ' »' : '.')
               . ($peut_resoumettre ? '<br>Modifiez le courrier ou ses pièces jointes, puis soumettez-le à nouveau.' : '');
         $etat_classe = 'attente';
     } elseif ($sortant_a_valider) {
-        $etat = $est_dg ? 'Ce courrier sortant attend votre validation : vérifiez la lettre et les pièces jointes avant l\'envoi.'
+        $etat = $est_dg ? 'Ce courrier sortant attend votre validation : vérifiez la lettre et les pièces jointes avant l\'envoi, ou affectez-le à un service s\'il doit être préparé.'
                         : 'En attente de la validation du DG avant l\'envoi.';
         $etat_classe = $est_dg ? 'attente' : '';
     } elseif ($cour['statut'] === 'TRAITE') {
@@ -431,7 +450,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
       <button type="button" class="btn btn-sm btn-ok" onclick="ouvrirModal('modalValider')"><i class="fa-solid fa-check"></i> Valider pour envoi</button>
     <?php endif; ?>
     <?php if ($peut_renvoyer_s): ?>
-      <button type="button" class="btn btn-sm btn-warn" onclick="ouvrirModal('modalRejeter')"><i class="fa-solid fa-rotate-left"></i> Renvoyer pour correction</button>
+      <button type="button" class="btn btn-sm btn-warn" onclick="ouvrirModal('modalRejeter')"><i class="fa-solid fa-rotate-left"></i> <?= $pilote ? 'Renvoyer au pilote' : 'Renvoyer pour correction' ?></button>
     <?php endif; ?>
     <?php if ($peut_resoumettre): ?>
       <?php if ($peut_modifier): ?>
@@ -446,7 +465,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
         <button type="button" class="btn btn-primary btn-sm" onclick="ouvrirModal('modalExpedier')"><i class="fa-solid fa-truck-fast"></i> Marquer comme expédié</button>
       <?php endif; ?>
     <?php endif; ?>
-    <?php if ($entrant && $est_pilote && $pilote_statut === 'A_TRAITER' && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
+    <?php if ($est_pilote && $pilote_statut === 'A_TRAITER' && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
       <form method="POST" action="actions.php" style="display:inline;">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="commencer">
@@ -454,7 +473,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
         <button type="submit" class="btn btn-secondary btn-sm"><i class="fa-solid fa-play"></i> Commencer le traitement</button>
       </form>
     <?php endif; ?>
-    <?php if ($entrant && $est_pilote && in_array($pilote_statut, ['A_TRAITER','EN_COURS'], true) && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
+    <?php if ($est_pilote && in_array($pilote_statut, ['A_TRAITER','EN_COURS'], true) && !in_array($cour['statut'], ['TRAITE','CLOTURE','ARCHIVE'], true)): ?>
       <button type="button" class="btn btn-sm btn-ok" onclick="ouvrirModal('modalSoumettre')"><i class="fa-solid fa-paper-plane"></i> Soumettre au DG</button>
     <?php endif; ?>
     <?php if ($entrant && $est_dg && $pilote_statut === 'SOUMIS'): ?>
@@ -636,7 +655,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
               <?= e(ucfirst(strtolower(str_replace('_', ' ', $s['action'])))) ?>
               <?php if (!empty($s['nouveau_statut']) && $s['nouveau_statut'] !== $s['ancien_statut']): ?>
                 <span style="font-weight:500;color:var(--text-muted);">
-                  → <?= e(courrier_statut_info($s['nouveau_statut'], $cour['sens'])['label']) ?>
+                  → <?= e(courrier_statut_info($s['nouveau_statut'], $cour['sens'], $pilote !== null)['label']) ?>
                 </span>
               <?php endif; ?>
             </div>
@@ -811,7 +830,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
   <div class="modal" style="max-width:480px;">
     <div class="modal-header">
       <i class="fa-solid fa-rotate-left" style="color:#c2410c;"></i>
-      <h3><?= $entrant ? 'Renvoyer au pilote' : 'Renvoyer pour correction' ?></h3>
+      <h3><?= $entrant || $pilote ? 'Renvoyer au pilote' : 'Renvoyer pour correction' ?></h3>
       <button class="modal-close" type="button" onclick="fermerModal('modalRejeter')"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <form method="POST" action="actions.php">
@@ -822,7 +841,7 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
         <label class="form-label"><?= $entrant ? 'Ce qui doit être revu' : 'Corrections attendues' ?> <span class="req">*</span></label>
         <textarea name="motif" class="form-control" rows="4" required maxlength="2000"
                   placeholder="<?= $entrant ? 'Précisez les compléments attendus…' : 'Ex. : corriger la date, joindre l\'annexe signée…' ?>"></textarea>
-        <div class="hint"><?= $entrant ? 'Le traitement repasse « en cours » et l\'agent pilote est prévenu.'
+        <div class="hint"><?= $entrant || $pilote ? 'Le traitement repasse « en cours » et ' . e($pilote['nom_complet'] ?? 'l\'agent pilote') . ' est prévenu(e).'
                                        : 'Le courrier repasse « À corriger » et ' . e($cour['enregistreur_nom'] ?: 'la personne qui l\'a enregistré') . ' est prévenu(e).' ?></div>
       </div>
       <div class="modal-footer">
@@ -1015,6 +1034,8 @@ function allerFil() {
   // Arrivée depuis une notification : ouvrir le fil sur le dernier message
   const liste = document.getElementById("filList");
   if (liste) liste.scrollTop = liste.scrollHeight;
+  // Arrivée depuis le bouton « Affecter » du registre
+  if (<?= $ouvrir_affect ? 'true' : 'false' ?>) ouvrirModal("modalAffecter");
   if (<?= $focus_fil ? 'true' : 'false' ?> && liste) {
     const dernier = liste.lastElementChild;
     if (dernier) { dernier.classList.add("focus"); document.getElementById("tab-echanges").scrollIntoView({behavior: "smooth", block: "start"}); }

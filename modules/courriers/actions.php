@@ -59,7 +59,6 @@ switch ($action) {
     // ── Affecter : DG / super admin uniquement ──
     case 'affecter':
         if (!courrier_est_dg()) { set_flash('error', 'Seuls le DG et le super administrateur peuvent affecter un courrier.'); break; }
-        if ($sortant) { set_flash('error', 'Un courrier sortant ne s\'affecte pas : il est validé par le DG puis envoyé.'); break; }
         $copies = array_map('intval', (array)($_POST['copies'] ?? []));
         $res = courrier_affecter_equipe($cid, (int)($_POST['service_id'] ?? 0) ?: null, (int)($_POST['pilote'] ?? 0),
             $copies, clean($_POST['date_limite'] ?? '') ?: null, trim($_POST['instruction'] ?? ''));
@@ -131,8 +130,12 @@ switch ($action) {
             $flash($res, 'Courrier validé : il peut maintenant être envoyé au destinataire.');
             if ($res['succes']) {
                 $mailer();
-                courrier_diffuser($enregistreur(), $courant(), 'Courrier sortant validé',
+                $c = $courant();
+                courrier_diffuser($enregistreur(), $c, 'Courrier sortant validé',
                     'Le DG a validé le courrier sortant. Vous pouvez maintenant l\'envoyer au destinataire depuis sa fiche.', $msg);
+                if ($res['pilote']) {
+                    courrier_diffuser([$res['pilote']], $c, 'Courrier sortant validé', 'Le DG a validé le courrier que vous avez traité : il peut être envoyé au destinataire.', $msg);
+                }
             }
             break;
         }
@@ -154,11 +157,16 @@ switch ($action) {
         $motif = trim($_POST['motif'] ?? '');
         if ($sortant) {
             $res = courrier_sortant_renvoyer($cid, $motif);
-            $flash($res, 'Courrier renvoyé pour correction.');
+            $flash($res, !empty($res['pilote']) ? 'Courrier renvoyé à l\'agent pilote.' : 'Courrier renvoyé pour correction.');
             if ($res['succes']) {
                 $mailer();
-                courrier_diffuser($enregistreur(), $courant(), 'Courrier sortant à corriger',
-                    'Le DG demande des corrections avant l\'envoi. Modifiez le courrier puis soumettez-le à nouveau.', $motif);
+                if ($res['pilote']) {
+                    courrier_diffuser([$res['pilote']], $courant(), 'Courrier à revoir',
+                        'Le DG vous renvoie le courrier sortant : des corrections sont attendues avant l\'envoi.', $motif);
+                } else {
+                    courrier_diffuser($enregistreur(), $courant(), 'Courrier sortant à corriger',
+                        'Le DG demande des corrections avant l\'envoi. Modifiez le courrier puis soumettez-le à nouveau.', $motif);
+                }
             }
             $retour = $fil;
             break;
