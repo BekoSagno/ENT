@@ -69,6 +69,7 @@ $delai_depasse = $pilote && !empty($pilote['date_limite']) && $pilote['date_limi
                  && in_array($pilote_statut, ['A_TRAITER', 'EN_COURS'], true);
 
 $services     = $peut_affecter ? courrier_services_arbre() : [];
+$types_unite  = ['DIRECTION'=>'Direction','DEPARTEMENT'=>'Département','LABORATOIRE'=>'Laboratoire','SERVICE'=>'Service','EQUIPE'=>'Équipe'];
 $utilisateurs = $peut_affecter ? courrier_utilisateurs()   : [];
 $copies_ids   = array_map(fn($a) => (int)$a['utilisateur_id'], $copies);
 $delai_defaut = max(date('Y-m-d'), $pilote['date_limite'] ?? ($cour['date_echeance'] ?: date('Y-m-d', strtotime('+7 days'))));
@@ -693,11 +694,11 @@ $initiales = fn(string $n) => mb_strtoupper(implode('', array_map(fn($p) => mb_s
             <?php foreach ($services as $sv): ?>
               <option value="<?= $sv['id'] ?>" data-resp="<?= (int)($sv['resp_user_id'] ?? 0) ?>" data-resp-nom="<?= e($sv['resp_nom'] ?? '') ?>"
                 <?= (string)($cour['service_id'] ?? '') === (string)$sv['id'] ? 'selected' : '' ?>>
-                <?= str_repeat('— ', (int)$sv['niveau']) . e($sv['nom']) ?>
+                <?= str_repeat('— ', (int)$sv['niveau']) . e($sv['nom']) ?><?= isset($types_unite[$sv['type']]) ? ' (' . $types_unite[$sv['type']] . ')' : '' ?>
               </option>
             <?php endforeach; ?>
           </select>
-          <div class="hint" id="affRespHint">Issu de l'organigramme. Son responsable est proposé comme agent pilote.</div>
+          <div class="hint" id="affRespHint">Liste issue de l'organigramme (Personnel › Organigramme). Le responsable de la structure est proposé comme agent pilote.</div>
         </div>
         <div class="row-2">
           <div class="form-group">

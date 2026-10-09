@@ -83,7 +83,10 @@ include __DIR__ . '/../../views/layout/header.php';
 .sens-pill{display:inline-flex;align-items:center;gap:5px;font-size:.72rem;font-weight:700;padding:2px 9px;border-radius:7px;}
 .sens-in{background:#dcfce7;color:#166534;}
 .sens-out{background:#dbeafe;color:#1d4ed8;}
-.act-btns{display:flex;gap:5px;flex-wrap:nowrap;}
+.act-btns{display:flex;gap:5px;flex-wrap:nowrap;align-items:center;}
+.act-btns .act-suppr{background:#fee2e2;border:1px solid #fecaca;color:#991b1b;border-radius:7px;width:34px;height:34px;cursor:pointer;font-size:.78rem;flex-shrink:0;}
+.act-btns .act-vide{width:34px;height:34px;flex-shrink:0;}
+.act-btns .act-affecter{height:34px;white-space:nowrap;}
 .pager{display:flex;gap:5px;justify-content:center;flex-wrap:wrap;margin-top:20px;}
 .pager a,.pager span{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:34px;padding:0 8px;border-radius:8px;border:1px solid var(--border);background:var(--surface);font-size:.82rem;font-weight:600;color:var(--text-muted);text-decoration:none;transition:all .12s;}
 .pager a:hover{border-color:var(--blue-400);color:var(--blue-600);}
@@ -309,16 +312,17 @@ include __DIR__ . '/../../views/layout/header.php';
           <a href="voir.php?id=<?= $c['id'] ?>" class="btn btn-secondary btn-sm btn-icon" title="Voir"><i class="fa-solid fa-eye"></i></a>
           <?php if ($peut_modifier && !courrier_sortant_verrouille($c)): ?>
             <a href="form.php?id=<?= $c['id'] ?>" class="btn btn-secondary btn-sm btn-icon" title="Modifier"><i class="fa-solid fa-pen"></i></a>
+          <?php elseif ($peut_modifier): ?>
+            <span class="act-vide"></span>
           <?php endif; ?>
           <?php if ($peut_supprimer): ?>
-            <button type="button" title="Supprimer"
-                    onclick="confirmerSuppr(<?= $c['id'] ?>, '<?= e(addslashes($c['reference'])) ?>')"
-                    style="background:#fee2e2;border:1px solid #fecaca;color:#991b1b;border-radius:7px;width:30px;height:30px;cursor:pointer;font-size:.78rem;">
+            <button type="button" title="Supprimer" class="act-suppr"
+                    onclick="confirmerSuppr(<?= $c['id'] ?>, '<?= e(addslashes($c['reference'])) ?>')">
               <i class="fa-solid fa-trash"></i>
             </button>
           <?php endif; ?>
           <?php if ($est_dg && in_array($c['statut'], ['RECU', 'AFFECTE', 'EN_TRAITEMENT'], true)): ?>
-            <a href="voir.php?id=<?= $c['id'] ?>&amp;affecter=1" class="btn btn-primary btn-sm" title="Choisir le service, l'agent pilote, les copies et le délai">
+            <a href="voir.php?id=<?= $c['id'] ?>&amp;affecter=1" class="btn btn-primary btn-sm act-affecter" title="Choisir le service, l'agent pilote, les copies et le délai">
               <i class="fa-solid fa-share-from-square"></i> Affecter
             </a>
           <?php endif; ?>
